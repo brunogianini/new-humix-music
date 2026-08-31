@@ -231,6 +231,34 @@ async function topPlatformAlbums(excludeIds: Set<string>, limit: number): Promis
     .map(toAlbumDTO);
 }
 
+// Reissues/remixes/live compilations that are really the same album as one
+// already registered — never worth surfacing as a separate recommendation.
+const ALTERNATE_EDITION_PATTERN =
+  /\b(deluxe|anniversary|remaster(ed)?|remix(es)?|rmx|expanded|reissue|edition|bonus\s*tracks?|demos?|live\s*recordings?|dis[ck]\s*\d+)\b/i;
+
+function normalizeAlbumTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[([][^)\]]*[)\]]/g, " ") // strip "(...)" / "[...]" qualifiers
+    .replace(/[-–—:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// True when `title` reads as an alternate/deluxe pressing of one of
+// `siblingTitles` — another title already registered for the same artist
+// ("Disk 2", a remix set, an anniversary remaster, "Kid A Mnesia", a live
+// recording of an album that already exists under its studio title) —
+// rather than a distinct release of its own. Callers must exclude the
+// title's own entry from `siblingTitles` first.
+function isAlternateEdition(title: string, siblingTitles: string[]): boolean {
+  if (ALTERNATE_EDITION_PATTERN.test(title)) return true;
+  const normalized = normalizeAlbumTitle(title);
+  return siblingTitles.some(
+    (sibling) => normalized === sibling || (sibling.length < normalized.length && normalized.startsWith(`${sibling} `))
+  );
+}
+
 // When the local catalog (only albums someone has already searched/saved)
 // runs out of same-artist picks, ask Spotify directly for the rest of the
 // viewer's favorite artists' discographies. Best-effort: one artist failing
@@ -238,6 +266,7 @@ async function topPlatformAlbums(excludeIds: Set<string>, limit: number): Promis
 async function liveDiscographyPicks(
   artists: string[],
   excludeMbids: Set<string>,
+  registeredTitlesByArtist: Map<string, string[]>,
   limit: number
 ): Promise<SearchResult[]> {
   if (limit <= 0 || artists.length === 0) return [];
@@ -249,9 +278,16 @@ async function liveDiscographyPicks(
   const picked = new Map<string, SearchResult>();
   for (const r of results) {
     if (r.status !== "fulfilled") continue;
-    for (const release of r.value.releases) {
+    // Shortest title first, so a base album is accepted (and becomes a
+    // sibling in its own right) before its longer reissues/live variants are
+    // evaluated — Spotify's discography can list both side by side.
+    const siblings = [...(registeredTitlesByArtist.get(r.value.artist.name) ?? [])];
+    const releases = [...r.value.releases].sort((a, b) => a.title.length - b.title.length);
+    for (const release of releases) {
       if (picked.size >= limit) break;
       if (excludeMbids.has(release.mbid) || picked.has(release.mbid)) continue;
+      if (isAlternateEdition(release.title, siblings)) continue;
+      siblings.push(normalizeAlbumTitle(release.title));
       picked.set(release.mbid, release);
     }
   }
@@ -288,13 +324,24 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     .map(([artist]) => artist);
 
   const picked = new Map<string, AlbumRow>();
+  const registeredTitlesByArtist = new Map<string, string[]>();
 
   if (topArtists.length > 0) {
-    const sameArtistAlbums = await prisma.album.findMany({
-      where: { artist: { in: topArtists }, id: { notIn: [...excludeIds] } },
-      orderBy: { releaseDate: "desc" },
-      take: FOR_YOU_LIMIT,
-    });
+    const artistCatalog = await prisma.album.findMany({ where: { artist: { in: topArtists } } });
+    for (const a of artistCatalog) {
+      const list = registeredTitlesByArtist.get(a.artist) ?? [];
+      list.push(normalizeAlbumTitle(a.title));
+      registeredTitlesByArtist.set(a.artist, list);
+    }
+
+    const sameArtistAlbums = artistCatalog
+      .filter((a) => !excludeIds.has(a.id))
+      .filter((a) => {
+        const ownTitle = normalizeAlbumTitle(a.title);
+        const siblings = (registeredTitlesByArtist.get(a.artist) ?? []).filter((t) => t !== ownTitle);
+        return !isAlternateEdition(a.title, siblings);
+      })
+      .sort((a, b) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""));
     for (const a of sameArtistAlbums) {
       if (picked.size >= FOR_YOU_LIMIT) break;
       picked.set(a.id, a);
@@ -320,7 +367,12 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     const knownMbids = await knownAlbumMbidsForUser(userId);
     const pickedMbids = [...picked.values()].map((a) => a.mbid);
     const excludeMbids = new Set([...knownMbids, ...pickedMbids]);
-    const live = await liveDiscographyPicks(topArtists, excludeMbids, FOR_YOU_LIMIT - albums.length);
+    const live = await liveDiscographyPicks(
+      topArtists,
+      excludeMbids,
+      registeredTitlesByArtist,
+      FOR_YOU_LIMIT - albums.length
+    );
     albums.push(...live);
   }
 

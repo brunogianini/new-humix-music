@@ -76,6 +76,7 @@ export function ForYouView({
             onOpen={onOpenAlbum}
             onOpenArtist={onOpenArtist}
             showQuickActions={false}
+            showTracks={false}
           />
         ))}
       </div>

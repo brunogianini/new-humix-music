@@ -42,9 +42,11 @@ next-env.d.ts
 
 /src/generated/prisma
 
-# local sqlite database (personal library data)
+# local sqlite database (personal library data) and migration artifacts
 /prisma/dev.db
 /prisma/dev.db-journal
+/prisma/dev.db.backup-*
+/prisma/sqlite-export.json
 
 # user-uploaded avatar/cover images
 /public/uploads

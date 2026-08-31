@@ -17,6 +17,11 @@ const MIN_COMMUNITY_LOGS = 2;
 // out of same-artist/collaborative picks. Each lookup is a real API call,
 // so this stays small.
 const SPOTIFY_FALLBACK_ARTISTS = 3;
+// A like counts several times as much as a bare high rating when tallying
+// favorite artists — likes are the dominant "for you" signal, a rating
+// alone is only reinforcement.
+const LIKE_WEIGHT = 3;
+const RATING_ONLY_WEIGHT = 1;
 
 type AlbumRow = {
   id: string;
@@ -170,10 +175,12 @@ async function findDiscoveryAlbums(album: AlbumRow, excludeIds: Set<string>): Pr
 // and/or rated above 3.5 stars (>HIGH_RATING_THRESHOLD on the 0-10
 // half-star scale). A hated album they still logged shouldn't count toward
 // "artists they love" — only an explicit like or a genuinely high rating
-// does. One entry per album (relistens are averaged into a single rating).
+// does. `liked` is the dominant signal (see LIKE_WEIGHT below) — a rating
+// alone is reinforcement, not a substitute for it. One entry per album
+// (relistens are averaged into a single rating).
 async function userPositiveSignals(
   userId: string
-): Promise<{ albumId: string; artist: string; rating: number | null }[]> {
+): Promise<{ albumId: string; artist: string; rating: number | null; liked: boolean }[]> {
   const [logs, likes] = await Promise.all([
     prisma.listenLog.findMany({
       where: { userId, rating: { not: null } },
@@ -198,11 +205,11 @@ async function userPositiveSignals(
     perAlbum.set(s.albumId, cur);
   }
 
-  const positive: { albumId: string; artist: string; rating: number | null }[] = [];
+  const positive: { albumId: string; artist: string; rating: number | null; liked: boolean }[] = [];
   for (const [albumId, v] of perAlbum) {
     const rating = v.ratings.length ? v.ratings.reduce((s, r) => s + r, 0) / v.ratings.length : null;
     if (v.liked || (rating != null && rating > HIGH_RATING_THRESHOLD)) {
-      positive.push({ albumId, artist: v.artist, rating });
+      positive.push({ albumId, artist: v.artist, rating, liked: v.liked });
     }
   }
   return positive;
@@ -315,11 +322,13 @@ async function liveDiscographyPicks(
 // taste signal, not just one album: liked albums and albums rated above 3.5
 // stars feed both the favorite-artist expansion (local catalog first, then
 // live Spotify lookups once that runs dry) and a collaborative pass over
-// users who share their taste (loved the same albums they loved). Falls
-// back to platform-wide trending picks only for accounts with no positive
-// signal at all — an account with history but no new picks still reports
-// mode "personalized" (with an empty list), since "rate something to get
-// started" would be a wrong thing to tell them.
+// users who share their taste (loved the same albums they loved). Likes are
+// the dominant signal throughout — a rating without a like only reinforces
+// or fills gaps, never outranks an actual like. Falls back to platform-wide
+// trending picks only for accounts with no positive signal at all — an
+// account with history but no new picks still reports mode "personalized"
+// (with an empty list), since "rate something to get started" would be a
+// wrong thing to tell them.
 export async function getForYouRecommendations(userId: string): Promise<ForYouDTO> {
   const [signals, known] = await Promise.all([userPositiveSignals(userId), albumsKnownToUser(userId)]);
   const excludeIds = new Set(known);
@@ -328,14 +337,20 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
   }
 
-  // Rated signals rank by rating; a liked-but-unrated album counts as a
-  // baseline-strong signal (right at the threshold) rather than the weakest.
+  // Liked albums lead the seed list regardless of rating — a rating-only
+  // signal only fills in once likes run out, and only breaks ties by score.
   const seeds = [...signals]
-    .sort((a, b) => (b.rating ?? HIGH_RATING_THRESHOLD) - (a.rating ?? HIGH_RATING_THRESHOLD))
+    .sort((a, b) => {
+      if (a.liked !== b.liked) return a.liked ? -1 : 1;
+      return (b.rating ?? HIGH_RATING_THRESHOLD) - (a.rating ?? HIGH_RATING_THRESHOLD);
+    })
     .slice(0, 8);
 
   const artistCounts = new Map<string, number>();
-  for (const s of signals) artistCounts.set(s.artist, (artistCounts.get(s.artist) ?? 0) + 1);
+  for (const s of signals) {
+    const weight = s.liked ? LIKE_WEIGHT : RATING_ONLY_WEIGHT;
+    artistCounts.set(s.artist, (artistCounts.get(s.artist) ?? 0) + weight);
+  }
   const topArtists = [...artistCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)

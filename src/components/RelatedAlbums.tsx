@@ -5,10 +5,12 @@ import { apiFetch } from "@/lib/api";
 import { AlbumCard, type AlbumLike, type ArtistRef } from "./AlbumCard";
 import type { RelatedAlbumsDTO } from "@/lib/types";
 
-const TITLES: Record<RelatedAlbumsDTO["mode"], string> = {
+// "neutral" mode (album not rated yet, or rating in the middle band) is
+// intentionally never shown — the section only surfaces once we have a
+// clear signal (loved it → similar, disliked it → discovery).
+const TITLES: Partial<Record<RelatedAlbumsDTO["mode"], string>> = {
   similar: "Porque você amou este álbum",
   discovery: "Talvez isso desperte seu interesse",
-  neutral: "Do mesmo universo",
 };
 
 export function RelatedAlbums({
@@ -55,6 +57,7 @@ export function RelatedAlbums({
 
   if (!albumId || loading) return null;
   if (!data || data.albums.length === 0) return null;
+  if (data.mode === "neutral") return null;
 
   return (
     <div className="border-t border-white/10 p-5">

@@ -2,7 +2,6 @@
 
 import { StarRating } from "../StarRating";
 import { AlbumCard, type AlbumLike, type ArtistRef } from "../AlbumCard";
-import { ForYou } from "../ForYou";
 import { useLibrary } from "@/context/LibraryContext";
 
 function formatDate(iso: string) {
@@ -43,17 +42,12 @@ export function HomeView({
         >
           Buscar álbuns
         </button>
-        <div className="mt-4 w-full text-left">
-          <ForYou onOpenAlbum={onOpenAlbum} onOpenArtist={onOpenArtist} />
-        </div>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-8">
-      <ForYou onOpenAlbum={onOpenAlbum} onOpenArtist={onOpenArtist} />
-
       {recent.length > 0 && (
         <section>
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-400">

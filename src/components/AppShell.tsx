@@ -9,6 +9,7 @@ import {
   NotebookText,
   Search,
   Settings,
+  Sparkles,
   Users,
   UserRound,
 } from "lucide-react";
@@ -19,6 +20,7 @@ import { HomeView } from "./views/HomeView";
 import { SearchView } from "./views/SearchView";
 import { DiaryView } from "./views/DiaryView";
 import { ListsView } from "./views/ListsView";
+import { ForYouView } from "./views/ForYouView";
 import { ProfileView } from "./views/ProfileView";
 import { ArtistView } from "./views/ArtistView";
 import { FriendsView } from "./views/FriendsView";
@@ -27,11 +29,12 @@ import { TopBar } from "./TopBar";
 import { AlbumModal } from "./AlbumModal";
 import type { AlbumLike, ArtistRef } from "./AlbumCard";
 
-type Tab = "home" | "search" | "diary" | "lists" | "friends" | "profile" | "settings";
+type Tab = "home" | "search" | "forYou" | "diary" | "lists" | "friends" | "profile" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Home }[] = [
   { id: "home", label: "Início", icon: Home },
   { id: "search", label: "Buscar", icon: Search },
+  { id: "forYou", label: "Para você", icon: Sparkles },
   { id: "diary", label: "Diário", icon: NotebookText },
   { id: "lists", label: "Listas", icon: ListMusic },
   { id: "friends", label: "Amigos", icon: Users },
@@ -108,6 +111,9 @@ export function AppShell() {
             )}
             {tab === "search" && (
               <SearchView onOpenAlbum={setActiveAlbum} onOpenArtist={setActiveArtist} />
+            )}
+            {tab === "forYou" && (
+              <ForYouView onOpenAlbum={setActiveAlbum} onOpenArtist={setActiveArtist} />
             )}
             {tab === "diary" && (
               <DiaryView onOpenAlbum={setActiveAlbum} onOpenArtist={setActiveArtist} />

@@ -4,18 +4,22 @@ import type { NextRequest } from "next/server";
 // Next.js 16 renamed middleware.js -> proxy.js; this file replaces the old
 // middleware.ts convention. Only an optimistic cookie-presence check (no JWT
 // decrypt here) — real verification happens per-request in the DAL/API guard.
-const PUBLIC_PATHS = ["/login", "/register"];
+// "/" is intentionally left out of AUTH_ONLY_PATHS: it's public (landing page
+// for guests) but not redirect-away-when-logged-in — src/app/page.tsx decides
+// whether to render the landing page or the app shell based on session.
+const AUTH_ONLY_PATHS = ["/login", "/register"];
 
 export default function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const isPublic = PUBLIC_PATHS.includes(pathname);
+  const isAuthOnly = AUTH_ONLY_PATHS.includes(pathname);
+  const isPublic = pathname === "/" || isAuthOnly;
   const hasSession = req.cookies.has("session");
 
   if (!isPublic && !hasSession) {
     return NextResponse.redirect(new URL("/login", req.nextUrl));
   }
 
-  if (isPublic && hasSession) {
+  if (isAuthOnly && hasSession) {
     return NextResponse.redirect(new URL("/", req.nextUrl));
   }
 

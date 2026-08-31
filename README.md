@@ -1,4 +1,4 @@
-# Vinyl Diary
+# Humix Music
 
 Um "Letterboxd para álbuns", multi-usuário: crie sua conta, busque álbuns,
 avalie, escreva resenhas, registre um diário de escutas (com suporte a

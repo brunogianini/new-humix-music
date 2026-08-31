@@ -8,7 +8,7 @@ export default function LoginPage() {
         <div className="mb-6 flex items-center justify-center gap-2 text-accent">
           <Disc3 size={28} />
           <span className="text-lg font-semibold tracking-tight text-neutral-50">
-            Vinyl Diary
+            Humix Music
           </span>
         </div>
         <div className="rounded-lg bg-neutral-900 p-6 ring-1 ring-white/10">

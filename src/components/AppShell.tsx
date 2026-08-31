@@ -52,7 +52,7 @@ export function AppShell() {
         <div className="mb-6 flex items-center justify-center gap-2 px-1 text-accent md:justify-start md:px-2">
           <Disc3 size={26} />
           <span className="hidden text-base font-semibold tracking-tight text-neutral-50 md:inline">
-            Vinyl Diary
+            Humix Music
           </span>
         </div>
 

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Vinyl Diary",
+  title: "Humix Music",
   description: "Seu diário pessoal de álbuns — avalie, resenhe e organize suas escutas.",
 };
 

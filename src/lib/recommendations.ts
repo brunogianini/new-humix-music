@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getEffectiveUserAlbumRating } from "@/lib/albumAggregate";
+import { getArtistDiscography, type SearchResult } from "@/lib/spotify";
 import type { AlbumDTO, ForYouDTO, RelatedAlbumsDTO } from "@/lib/types";
 
 // Rating scale is 0-10 (half-stars, see StarRating). >=7 is ~3.5+ stars,
@@ -11,6 +12,11 @@ const FOR_YOU_LIMIT = 16;
 // Same floor RelatedAlbums/PlatformStats use before trusting a pooled
 // average — one lone 10/10 shouldn't dominate the "trending" fallback.
 const MIN_COMMUNITY_LOGS = 2;
+// How many of the viewer's top artists to look up live on Spotify when the
+// local catalog (only albums someone has already searched/imported) runs
+// out of same-artist/collaborative picks. Each lookup is a real API call,
+// so this stays small.
+const SPOTIFY_FALLBACK_ARTISTS = 3;
 
 type AlbumRow = {
   id: string;
@@ -185,6 +191,19 @@ async function userRatedAlbums(
   }));
 }
 
+// Same "already touched" definition as albumsKnownToUser(), but keyed by
+// Spotify id (mbid) — needed to dedupe against live Spotify lookups, which
+// don't have a local Album row (and therefore no local id) yet.
+async function knownAlbumMbidsForUser(userId: string): Promise<Set<string>> {
+  const rows = await prisma.album.findMany({
+    where: {
+      OR: [{ logs: { some: { userId } } }, { status: { some: { userId } } }],
+    },
+    select: { mbid: true },
+  });
+  return new Set(rows.map((r) => r.mbid));
+}
+
 // Cold-start fallback (brand new account, or no collaborative/same-artist
 // matches found): the platform's best-regarded albums, same ranking
 // PlatformStats uses for "highestRatedAlbum".
@@ -212,11 +231,41 @@ async function topPlatformAlbums(excludeIds: Set<string>, limit: number): Promis
     .map(toAlbumDTO);
 }
 
+// When the local catalog (only albums someone has already searched/saved)
+// runs out of same-artist picks, ask Spotify directly for the rest of the
+// viewer's favorite artists' discographies. Best-effort: one artist failing
+// (rate limit, not found) shouldn't drop the others.
+async function liveDiscographyPicks(
+  artists: string[],
+  excludeMbids: Set<string>,
+  limit: number
+): Promise<SearchResult[]> {
+  if (limit <= 0 || artists.length === 0) return [];
+
+  const results = await Promise.allSettled(
+    artists.slice(0, SPOTIFY_FALLBACK_ARTISTS).map((name) => getArtistDiscography({ name }))
+  );
+
+  const picked = new Map<string, SearchResult>();
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    for (const release of r.value.releases) {
+      if (picked.size >= limit) break;
+      if (excludeMbids.has(release.mbid) || picked.has(release.mbid)) continue;
+      picked.set(release.mbid, release);
+    }
+  }
+  return [...picked.values()];
+}
+
 // "For you" — personalized picks built from the viewer's whole listening
-// history, not just one album: expand their favorite artists' discographies,
-// plus a collaborative pass over users who share their taste (loved the same
-// albums they loved). Falls back to platform-wide trending picks for new
-// accounts or when neither signal turns up anything.
+// history, not just one album: expand their favorite artists' discographies
+// (local catalog first, then live Spotify lookups once that runs dry), plus
+// a collaborative pass over users who share their taste (loved the same
+// albums they loved). Falls back to platform-wide trending picks only for
+// accounts with no rated albums at all — an account with history but no new
+// picks still reports mode "personalized" (with an empty list), since "rate
+// something to get started" would be a wrong thing to tell them.
 export async function getForYouRecommendations(userId: string): Promise<ForYouDTO> {
   const [rated, known] = await Promise.all([userRatedAlbums(userId), albumsKnownToUser(userId)]);
   const excludeIds = new Set(known);
@@ -265,14 +314,22 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     for (const a of collaborative) picked.set(a.id, a);
   }
 
-  if (picked.size === 0) {
-    return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
+  const albums: (AlbumDTO | SearchResult)[] = [...picked.values()].map(toAlbumDTO);
+
+  if (albums.length < FOR_YOU_LIMIT && topArtists.length > 0) {
+    const knownMbids = await knownAlbumMbidsForUser(userId);
+    const pickedMbids = [...picked.values()].map((a) => a.mbid);
+    const excludeMbids = new Set([...knownMbids, ...pickedMbids]);
+    const live = await liveDiscographyPicks(topArtists, excludeMbids, FOR_YOU_LIMIT - albums.length);
+    albums.push(...live);
   }
 
-  return {
-    mode: "personalized",
-    albums: [...picked.values()].slice(0, FOR_YOU_LIMIT).map(toAlbumDTO),
-  };
+  if (albums.length === 0) {
+    const trending = await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT);
+    return { mode: "personalized", albums: trending };
+  }
+
+  return { mode: "personalized", albums: albums.slice(0, FOR_YOU_LIMIT) };
 }
 
 export async function getRelatedAlbums(albumId: string, userId: string): Promise<RelatedAlbumsDTO> {

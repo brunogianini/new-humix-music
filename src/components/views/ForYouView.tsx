@@ -47,13 +47,15 @@ export function ForYouView({
   if (loading) return <p className="text-sm text-neutral-500">Carregando…</p>;
 
   if (!data || data.albums.length === 0) {
+    const isColdStart = !data || data.mode === "trending";
     return (
       <div className="flex flex-col items-center gap-3 rounded-lg bg-neutral-900 p-10 text-center">
         <Sparkles size={32} className="text-accent" />
         <h2 className="text-lg font-semibold text-neutral-100">Nada por aqui ainda</h2>
         <p className="max-w-sm text-sm text-neutral-500">
-          Avalie alguns álbuns no seu diário para começar a receber recomendações — ou volte mais
-          tarde, quando mais gente tiver avaliado álbuns em comum com você.
+          {isColdStart
+            ? "Avalie alguns álbuns no seu diário para começar a receber recomendações — ou volte mais tarde, quando mais gente tiver avaliado álbuns em comum com você."
+            : "Você já esgotou o que sabemos sobre os artistas que mais curte por aqui. Busque novidades ou avalie mais álbuns para abrir novas recomendações."}
         </p>
       </div>
     );
@@ -69,7 +71,7 @@ export function ForYouView({
       <div className="grid grid-cols-2 gap-x-5 gap-y-8 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
         {data.albums.map((a) => (
           <AlbumCard
-            key={a.id}
+            key={a.mbid}
             album={a}
             onOpen={onOpenAlbum}
             onOpenArtist={onOpenArtist}

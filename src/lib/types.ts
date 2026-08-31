@@ -1,3 +1,5 @@
+import type { SearchResult } from "@/lib/spotify";
+
 export type AlbumDTO = {
   id: string;
   mbid: string;
@@ -32,10 +34,12 @@ export type RelatedAlbumsDTO = {
 
 // Personalized picks derived from the viewer's own listening history — not
 // to be confused with RecommendationDTO, which is a friend-to-friend album
-// dare (see the Amigos tab).
+// dare (see the Amigos tab). Entries can be plain AlbumDTOs (already in our
+// catalog) or live Spotify SearchResults (favorite artist's discography
+// hasn't been imported locally yet) — AlbumCard already renders either.
 export type ForYouDTO = {
   mode: "personalized" | "trending";
-  albums: AlbumDTO[];
+  albums: (AlbumDTO | SearchResult)[];
 };
 
 export type DiaryEntryDTO = {

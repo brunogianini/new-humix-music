@@ -9,6 +9,11 @@ const HIGH_RATING_THRESHOLD = 7;
 const LOW_RATING_THRESHOLD = 4;
 const RELATED_LIMIT = 8;
 const FOR_YOU_LIMIT = 16;
+// Internally gather a wider pool than we actually show, then randomly
+// sample FOR_YOU_LIMIT from it on every call — so the refresh button (which
+// just re-requests this endpoint) surfaces a different mix each time
+// instead of the same deterministic ranking.
+const CANDIDATE_POOL_SIZE = FOR_YOU_LIMIT * 3;
 // Same floor RelatedAlbums/PlatformStats use before trusting a pooled
 // average — one lone 10/10 shouldn't dominate the "trending" fallback.
 const MIN_COMMUNITY_LOGS = 2;
@@ -17,11 +22,20 @@ const MIN_COMMUNITY_LOGS = 2;
 // out of same-artist/collaborative picks. Each lookup is a real API call,
 // so this stays small.
 const SPOTIFY_FALLBACK_ARTISTS = 3;
-// A like counts several times as much as a bare high rating when tallying
-// favorite artists — likes are the dominant "for you" signal, a rating
-// alone is only reinforcement.
-const LIKE_WEIGHT = 3;
-const RATING_ONLY_WEIGHT = 1;
+// Same-artist picks are capped and reserved out of FOR_YOU_LIMIT so one
+// artist's catalog size can never crowd out either another favorite artist
+// or the shuffled discovery portion that gives refresh its variety.
+const PER_ARTIST_POOL_LIMIT = 6;
+const SAME_ARTIST_RESERVED = Math.ceil(FOR_YOU_LIMIT * 0.7);
+
+function shuffle<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 
 type AlbumRow = {
   id: string;
@@ -334,7 +348,8 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
   const excludeIds = new Set(known);
 
   if (signals.length === 0) {
-    return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
+    const trending = await topPlatformAlbums(excludeIds, CANDIDATE_POOL_SIZE);
+    return { mode: "trending", albums: shuffle(trending).slice(0, FOR_YOU_LIMIT) };
   }
 
   // Liked albums lead the seed list regardless of rating — a rating-only
@@ -346,17 +361,32 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     })
     .slice(0, 8);
 
-  const artistCounts = new Map<string, number>();
+  // Favorite artists are tiered, not summed: any artist with at least one
+  // like outranks every rated-only artist, no matter how many albums of
+  // theirs got a high rating without a like — volume of ratings must never
+  // let a rated-only artist crowd out someone the viewer actually liked.
+  const likedCounts = new Map<string, number>();
+  const ratedOnlyCounts = new Map<string, number>();
   for (const s of signals) {
-    const weight = s.liked ? LIKE_WEIGHT : RATING_ONLY_WEIGHT;
-    artistCounts.set(s.artist, (artistCounts.get(s.artist) ?? 0) + weight);
+    const bucket = s.liked ? likedCounts : ratedOnlyCounts;
+    bucket.set(s.artist, (bucket.get(s.artist) ?? 0) + 1);
   }
-  const topArtists = [...artistCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
+  const byCountDesc = (a: [string, number], b: [string, number]) => b[1] - a[1];
+  const likedArtists = [...likedCounts.entries()].sort(byCountDesc).map(([artist]) => artist);
+  const ratedOnlyArtists = [...ratedOnlyCounts.entries()]
+    .filter(([artist]) => !likedCounts.has(artist))
+    .sort(byCountDesc)
     .map(([artist]) => artist);
+  const topArtists = [...likedArtists, ...ratedOnlyArtists].slice(0, 5);
 
-  const picked = new Map<string, AlbumRow>();
+  // Same-artist picks are gathered artist-by-artist, in topArtists' priority
+  // order (liked artists first) and capped per artist — otherwise an artist
+  // that simply has a bigger catalog on file (regardless of like/rating)
+  // would flood the pool and crowd out an artist the viewer actually liked.
+  // This reserved portion stays in priority order (not shuffled), so it
+  // reads consistently as "because you liked X" across refreshes; only the
+  // collaborative/discovery portion below is randomized for variety.
+  const sameArtist = new Map<string, AlbumRow>();
   const registeredTitlesByArtist = new Map<string, string[]>();
 
   if (topArtists.length > 0) {
@@ -367,51 +397,74 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
       registeredTitlesByArtist.set(a.artist, list);
     }
 
-    const sameArtistAlbums = artistCatalog
-      .filter((a) => !excludeIds.has(a.id))
-      .filter((a) => {
-        const ownTitle = normalizeAlbumTitle(a.title);
-        const siblings = (registeredTitlesByArtist.get(a.artist) ?? []).filter((t) => t !== ownTitle);
-        return !isAlternateEdition(a.title, siblings);
-      })
-      .sort((a, b) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""));
-    for (const a of sameArtistAlbums) {
-      if (picked.size >= FOR_YOU_LIMIT) break;
-      picked.set(a.id, a);
+    const catalogByArtist = new Map<string, AlbumRow[]>();
+    for (const a of artistCatalog) {
+      if (excludeIds.has(a.id)) continue;
+      const ownTitle = normalizeAlbumTitle(a.title);
+      const siblings = (registeredTitlesByArtist.get(a.artist) ?? []).filter((t) => t !== ownTitle);
+      if (isAlternateEdition(a.title, siblings)) continue;
+      const list = catalogByArtist.get(a.artist) ?? [];
+      list.push(a);
+      catalogByArtist.set(a.artist, list);
+    }
+
+    for (const artist of topArtists) {
+      if (sameArtist.size >= SAME_ARTIST_RESERVED) break;
+      const releases = (catalogByArtist.get(artist) ?? []).sort(
+        (x, y) => (y.releaseDate ?? "").localeCompare(x.releaseDate ?? "")
+      );
+      let addedForArtist = 0;
+      for (const a of releases) {
+        if (addedForArtist >= PER_ARTIST_POOL_LIMIT || sameArtist.size >= SAME_ARTIST_RESERVED) break;
+        sameArtist.set(a.id, a);
+        addedForArtist++;
+      }
     }
   }
 
-  if (picked.size < FOR_YOU_LIMIT && seeds.length > 0) {
+  // Everything else — collaborative picks plus a live Spotify fallback —
+  // feeds a wider discovery pool that gets shuffled on every call.
+  const discovery = new Map<string, AlbumRow>();
+  const discoveryExcludeIds = new Set([...excludeIds, ...sameArtist.keys()]);
+
+  if (seeds.length > 0) {
     const similarUserSets = await Promise.all(
       seeds.map((s) => usersWhoRatedAlbum(s.albumId, HIGH_RATING_THRESHOLD))
     );
     const similarUsers = [...new Set(similarUserSets.flat())].filter((id) => id !== userId);
     const collaborative = await topAlbumsRatedByUsers(
       similarUsers,
-      new Set([...excludeIds, ...picked.keys()]),
-      FOR_YOU_LIMIT - picked.size
+      discoveryExcludeIds,
+      CANDIDATE_POOL_SIZE
     );
-    for (const a of collaborative) picked.set(a.id, a);
+    for (const a of collaborative) discovery.set(a.id, a);
   }
 
-  const albums: (AlbumDTO | SearchResult)[] = [...picked.values()].map(toAlbumDTO);
+  let discoveryAlbums: (AlbumDTO | SearchResult)[] = [...discovery.values()].map(toAlbumDTO);
 
-  if (albums.length < FOR_YOU_LIMIT && topArtists.length > 0) {
+  if (discoveryAlbums.length < CANDIDATE_POOL_SIZE && topArtists.length > 0) {
     const knownMbids = await knownAlbumMbidsForUser(userId);
-    const pickedMbids = [...picked.values()].map((a) => a.mbid);
-    const excludeMbids = new Set([...knownMbids, ...pickedMbids]);
+    const localMbids = [...sameArtist.values(), ...discovery.values()].map((a) => a.mbid);
+    const excludeMbids = new Set([...knownMbids, ...localMbids]);
     const live = await liveDiscographyPicks(
       topArtists,
       excludeMbids,
       registeredTitlesByArtist,
-      FOR_YOU_LIMIT - albums.length
+      CANDIDATE_POOL_SIZE - discoveryAlbums.length
     );
-    albums.push(...live);
+    discoveryAlbums = discoveryAlbums.concat(live);
   }
 
+  const sameArtistAlbums = [...sameArtist.values()].map(toAlbumDTO);
+  const remainingSlots = Math.max(FOR_YOU_LIMIT - sameArtistAlbums.length, 0);
+  const albums: (AlbumDTO | SearchResult)[] = [
+    ...sameArtistAlbums,
+    ...shuffle(discoveryAlbums).slice(0, remainingSlots),
+  ];
+
   if (albums.length === 0) {
-    const trending = await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT);
-    return { mode: "personalized", albums: trending };
+    const trending = await topPlatformAlbums(excludeIds, CANDIDATE_POOL_SIZE);
+    return { mode: "personalized", albums: shuffle(trending).slice(0, FOR_YOU_LIMIT) };
   }
 
   return { mode: "personalized", albums: albums.slice(0, FOR_YOU_LIMIT) };

@@ -166,29 +166,46 @@ async function findDiscoveryAlbums(album: AlbumRow, excludeIds: Set<string>): Pr
     .map((x) => toAlbumDTO(x.album));
 }
 
-// This viewer's own albums with an average rating, one entry per album
-// (relistens are averaged), newest-rating-first ties broken by rating.
-async function userRatedAlbums(
+// This viewer's positive taste signals: albums they liked (heart icon)
+// and/or rated above 3.5 stars (>HIGH_RATING_THRESHOLD on the 0-10
+// half-star scale). A hated album they still logged shouldn't count toward
+// "artists they love" — only an explicit like or a genuinely high rating
+// does. One entry per album (relistens are averaged into a single rating).
+async function userPositiveSignals(
   userId: string
-): Promise<{ albumId: string; artist: string; rating: number }[]> {
-  const logs = await prisma.listenLog.findMany({
-    where: { userId, rating: { not: null } },
-    select: { albumId: true, rating: true, album: { select: { artist: true } } },
-  });
+): Promise<{ albumId: string; artist: string; rating: number | null }[]> {
+  const [logs, likes] = await Promise.all([
+    prisma.listenLog.findMany({
+      where: { userId, rating: { not: null } },
+      select: { albumId: true, rating: true, album: { select: { artist: true } } },
+    }),
+    prisma.albumStatus.findMany({
+      where: { userId, liked: true },
+      select: { albumId: true, album: { select: { artist: true } } },
+    }),
+  ]);
 
-  const perAlbum = new Map<string, { artist: string; ratings: number[] }>();
+  const perAlbum = new Map<string, { artist: string; ratings: number[]; liked: boolean }>();
   for (const l of logs) {
     if (l.rating == null) continue;
-    const cur = perAlbum.get(l.albumId) ?? { artist: l.album.artist, ratings: [] };
+    const cur = perAlbum.get(l.albumId) ?? { artist: l.album.artist, ratings: [], liked: false };
     cur.ratings.push(l.rating);
     perAlbum.set(l.albumId, cur);
   }
+  for (const s of likes) {
+    const cur = perAlbum.get(s.albumId) ?? { artist: s.album.artist, ratings: [], liked: false };
+    cur.liked = true;
+    perAlbum.set(s.albumId, cur);
+  }
 
-  return [...perAlbum.entries()].map(([albumId, v]) => ({
-    albumId,
-    artist: v.artist,
-    rating: v.ratings.reduce((s, r) => s + r, 0) / v.ratings.length,
-  }));
+  const positive: { albumId: string; artist: string; rating: number | null }[] = [];
+  for (const [albumId, v] of perAlbum) {
+    const rating = v.ratings.length ? v.ratings.reduce((s, r) => s + r, 0) / v.ratings.length : null;
+    if (v.liked || (rating != null && rating > HIGH_RATING_THRESHOLD)) {
+      positive.push({ albumId, artist: v.artist, rating });
+    }
+  }
+  return positive;
 }
 
 // Same "already touched" definition as albumsKnownToUser(), but keyed by
@@ -294,30 +311,31 @@ async function liveDiscographyPicks(
   return [...picked.values()];
 }
 
-// "For you" — personalized picks built from the viewer's whole listening
-// history, not just one album: expand their favorite artists' discographies
-// (local catalog first, then live Spotify lookups once that runs dry), plus
-// a collaborative pass over users who share their taste (loved the same
-// albums they loved). Falls back to platform-wide trending picks only for
-// accounts with no rated albums at all — an account with history but no new
-// picks still reports mode "personalized" (with an empty list), since "rate
-// something to get started" would be a wrong thing to tell them.
+// "For you" — personalized picks built from the viewer's whole positive
+// taste signal, not just one album: liked albums and albums rated above 3.5
+// stars feed both the favorite-artist expansion (local catalog first, then
+// live Spotify lookups once that runs dry) and a collaborative pass over
+// users who share their taste (loved the same albums they loved). Falls
+// back to platform-wide trending picks only for accounts with no positive
+// signal at all — an account with history but no new picks still reports
+// mode "personalized" (with an empty list), since "rate something to get
+// started" would be a wrong thing to tell them.
 export async function getForYouRecommendations(userId: string): Promise<ForYouDTO> {
-  const [rated, known] = await Promise.all([userRatedAlbums(userId), albumsKnownToUser(userId)]);
+  const [signals, known] = await Promise.all([userPositiveSignals(userId), albumsKnownToUser(userId)]);
   const excludeIds = new Set(known);
 
-  if (rated.length === 0) {
+  if (signals.length === 0) {
     return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
   }
 
-  const highlyRated = rated.filter((r) => r.rating >= HIGH_RATING_THRESHOLD).sort((a, b) => b.rating - a.rating);
-  const seeds = (highlyRated.length > 0 ? highlyRated : [...rated].sort((a, b) => b.rating - a.rating)).slice(
-    0,
-    8
-  );
+  // Rated signals rank by rating; a liked-but-unrated album counts as a
+  // baseline-strong signal (right at the threshold) rather than the weakest.
+  const seeds = [...signals]
+    .sort((a, b) => (b.rating ?? HIGH_RATING_THRESHOLD) - (a.rating ?? HIGH_RATING_THRESHOLD))
+    .slice(0, 8);
 
   const artistCounts = new Map<string, number>();
-  for (const r of rated) artistCounts.set(r.artist, (artistCounts.get(r.artist) ?? 0) + 1);
+  for (const s of signals) artistCounts.set(s.artist, (artistCounts.get(s.artist) ?? 0) + 1);
   const topArtists = [...artistCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)

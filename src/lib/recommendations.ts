@@ -24,8 +24,11 @@ const MIN_COMMUNITY_LOGS = 2;
 const SPOTIFY_FALLBACK_ARTISTS = 3;
 // Same-artist picks are capped and reserved out of FOR_YOU_LIMIT so one
 // artist's catalog size can never crowd out either another favorite artist
-// or the shuffled discovery portion that gives refresh its variety.
-const PER_ARTIST_POOL_LIMIT = 6;
+// or the shuffled discovery portion that gives refresh its variety. Kept
+// low (rather than PER_ARTIST_POOL_LIMIT * 5 == SAME_ARTIST_RESERVED) so a
+// viewer with only one or two liked artists still gets a page dominated by
+// discovery, not just a deep dive into the same two catalogs.
+const PER_ARTIST_POOL_LIMIT = 2;
 const SAME_ARTIST_RESERVED = Math.ceil(FOR_YOU_LIMIT * 0.7);
 
 function shuffle<T>(items: T[]): T[] {

@@ -146,12 +146,12 @@ export async function getPlatformStats(userId: string): Promise<PlatformStatsDTO
   // string ("YYYY" or "YYYY-MM-DD"), so grouping by year needs raw SQL.
   type YearRow = { year: string; albumId: string; avgRating: number; logCount: number };
   const yearRows = await prisma.$queryRaw<YearRow[]>`
-    SELECT substr(a."releaseDate", 1, 4) AS year, l."albumId" AS albumId,
-           AVG(l."rating") AS avgRating, COUNT(*) AS logCount
+    SELECT substr(a."releaseDate", 1, 4) AS "year", l."albumId" AS "albumId",
+           AVG(l."rating") AS "avgRating", COUNT(*) AS "logCount"
     FROM "ListenLog" l
     JOIN "Album" a ON a.id = l."albumId"
     WHERE l."rating" IS NOT NULL AND a."releaseDate" IS NOT NULL
-    GROUP BY year, l."albumId"
+    GROUP BY "year", l."albumId"
   `;
 
   const pickBestPerYear = (minLogs: number) => {

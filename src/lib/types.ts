@@ -30,6 +30,14 @@ export type RelatedAlbumsDTO = {
   albums: AlbumDTO[];
 };
 
+// Personalized picks derived from the viewer's own listening history — not
+// to be confused with RecommendationDTO, which is a friend-to-friend album
+// dare (see the Amigos tab).
+export type ForYouDTO = {
+  mode: "personalized" | "trending";
+  albums: AlbumDTO[];
+};
+
 export type DiaryEntryDTO = {
   id: string;
   albumId: string;

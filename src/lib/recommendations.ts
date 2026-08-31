@@ -1,12 +1,16 @@
 import { prisma } from "@/lib/prisma";
 import { getEffectiveUserAlbumRating } from "@/lib/albumAggregate";
-import type { AlbumDTO, RelatedAlbumsDTO } from "@/lib/types";
+import type { AlbumDTO, ForYouDTO, RelatedAlbumsDTO } from "@/lib/types";
 
 // Rating scale is 0-10 (half-stars, see StarRating). >=7 is ~3.5+ stars,
 // <=4 is ~2 stars or less.
 const HIGH_RATING_THRESHOLD = 7;
 const LOW_RATING_THRESHOLD = 4;
 const RELATED_LIMIT = 8;
+const FOR_YOU_LIMIT = 16;
+// Same floor RelatedAlbums/PlatformStats use before trusting a pooled
+// average — one lone 10/10 shouldn't dominate the "trending" fallback.
+const MIN_COMMUNITY_LOGS = 2;
 
 type AlbumRow = {
   id: string;
@@ -154,6 +158,121 @@ async function findDiscoveryAlbums(album: AlbumRow, excludeIds: Set<string>): Pr
     .sort((a, b) => b.avg - a.avg || b.count - a.count)
     .slice(0, RELATED_LIMIT)
     .map((x) => toAlbumDTO(x.album));
+}
+
+// This viewer's own albums with an average rating, one entry per album
+// (relistens are averaged), newest-rating-first ties broken by rating.
+async function userRatedAlbums(
+  userId: string
+): Promise<{ albumId: string; artist: string; rating: number }[]> {
+  const logs = await prisma.listenLog.findMany({
+    where: { userId, rating: { not: null } },
+    select: { albumId: true, rating: true, album: { select: { artist: true } } },
+  });
+
+  const perAlbum = new Map<string, { artist: string; ratings: number[] }>();
+  for (const l of logs) {
+    if (l.rating == null) continue;
+    const cur = perAlbum.get(l.albumId) ?? { artist: l.album.artist, ratings: [] };
+    cur.ratings.push(l.rating);
+    perAlbum.set(l.albumId, cur);
+  }
+
+  return [...perAlbum.entries()].map(([albumId, v]) => ({
+    albumId,
+    artist: v.artist,
+    rating: v.ratings.reduce((s, r) => s + r, 0) / v.ratings.length,
+  }));
+}
+
+// Cold-start fallback (brand new account, or no collaborative/same-artist
+// matches found): the platform's best-regarded albums, same ranking
+// PlatformStats uses for "highestRatedAlbum".
+async function topPlatformAlbums(excludeIds: Set<string>, limit: number): Promise<AlbumDTO[]> {
+  const groups = await prisma.listenLog.groupBy({
+    by: ["albumId"],
+    where: { rating: { not: null } },
+    _avg: { rating: true },
+    _count: { rating: true },
+  });
+
+  const ranked = groups
+    .filter(
+      (g) => g._avg.rating != null && g._count.rating >= MIN_COMMUNITY_LOGS && !excludeIds.has(g.albumId)
+    )
+    .sort((a, b) => b._avg.rating! - a._avg.rating! || b._count.rating - a._count.rating)
+    .slice(0, limit);
+
+  if (ranked.length === 0) return [];
+  const albums = await prisma.album.findMany({ where: { id: { in: ranked.map((r) => r.albumId) } } });
+  const byId = new Map(albums.map((a) => [a.id, a]));
+  return ranked
+    .map((r) => byId.get(r.albumId))
+    .filter((a): a is NonNullable<typeof a> => a != null)
+    .map(toAlbumDTO);
+}
+
+// "For you" — personalized picks built from the viewer's whole listening
+// history, not just one album: expand their favorite artists' discographies,
+// plus a collaborative pass over users who share their taste (loved the same
+// albums they loved). Falls back to platform-wide trending picks for new
+// accounts or when neither signal turns up anything.
+export async function getForYouRecommendations(userId: string): Promise<ForYouDTO> {
+  const [rated, known] = await Promise.all([userRatedAlbums(userId), albumsKnownToUser(userId)]);
+  const excludeIds = new Set(known);
+
+  if (rated.length === 0) {
+    return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
+  }
+
+  const highlyRated = rated.filter((r) => r.rating >= HIGH_RATING_THRESHOLD).sort((a, b) => b.rating - a.rating);
+  const seeds = (highlyRated.length > 0 ? highlyRated : [...rated].sort((a, b) => b.rating - a.rating)).slice(
+    0,
+    8
+  );
+
+  const artistCounts = new Map<string, number>();
+  for (const r of rated) artistCounts.set(r.artist, (artistCounts.get(r.artist) ?? 0) + 1);
+  const topArtists = [...artistCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([artist]) => artist);
+
+  const picked = new Map<string, AlbumRow>();
+
+  if (topArtists.length > 0) {
+    const sameArtistAlbums = await prisma.album.findMany({
+      where: { artist: { in: topArtists }, id: { notIn: [...excludeIds] } },
+      orderBy: { releaseDate: "desc" },
+      take: FOR_YOU_LIMIT,
+    });
+    for (const a of sameArtistAlbums) {
+      if (picked.size >= FOR_YOU_LIMIT) break;
+      picked.set(a.id, a);
+    }
+  }
+
+  if (picked.size < FOR_YOU_LIMIT && seeds.length > 0) {
+    const similarUserSets = await Promise.all(
+      seeds.map((s) => usersWhoRatedAlbum(s.albumId, HIGH_RATING_THRESHOLD))
+    );
+    const similarUsers = [...new Set(similarUserSets.flat())].filter((id) => id !== userId);
+    const collaborative = await topAlbumsRatedByUsers(
+      similarUsers,
+      new Set([...excludeIds, ...picked.keys()]),
+      FOR_YOU_LIMIT - picked.size
+    );
+    for (const a of collaborative) picked.set(a.id, a);
+  }
+
+  if (picked.size === 0) {
+    return { mode: "trending", albums: await topPlatformAlbums(excludeIds, FOR_YOU_LIMIT) };
+  }
+
+  return {
+    mode: "personalized",
+    albums: [...picked.values()].slice(0, FOR_YOU_LIMIT).map(toAlbumDTO),
+  };
 }
 
 export async function getRelatedAlbums(albumId: string, userId: string): Promise<RelatedAlbumsDTO> {

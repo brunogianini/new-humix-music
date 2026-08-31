@@ -22,14 +22,17 @@ const MIN_COMMUNITY_LOGS = 2;
 // out of same-artist/collaborative picks. Each lookup is a real API call,
 // so this stays small.
 const SPOTIFY_FALLBACK_ARTISTS = 3;
-// Same-artist picks are capped and reserved out of FOR_YOU_LIMIT so one
-// artist's catalog size can never crowd out either another favorite artist
-// or the shuffled discovery portion that gives refresh its variety. Kept
-// low (rather than PER_ARTIST_POOL_LIMIT * 5 == SAME_ARTIST_RESERVED) so a
-// viewer with only one or two liked artists still gets a page dominated by
-// discovery, not just a deep dive into the same two catalogs.
-const PER_ARTIST_POOL_LIMIT = 2;
-const SAME_ARTIST_RESERVED = Math.ceil(FOR_YOU_LIMIT * 0.7);
+// "For You" never resurfaces an artist the viewer already has in their
+// collection (logged/liked/want-to-listen) — see knownArtistsForUser(). What
+// fills that space instead is a bounded set of *related* artists (found via
+// findRelatedArtists' collaborative filtering), expanded into album picks
+// the same way a same-artist pool used to be: capped per artist and
+// reserved out of FOR_YOU_LIMIT so no single related artist — or the
+// shuffled discovery portion that gives refresh its variety — gets crowded
+// out.
+const MAX_RELATED_ARTISTS = 6;
+const PER_RELATED_ARTIST_LIMIT = 2;
+const RELATED_ARTIST_RESERVED = Math.ceil(FOR_YOU_LIMIT * 0.5);
 
 function shuffle<T>(items: T[]): T[] {
   const arr = [...items];
@@ -72,6 +75,20 @@ async function albumsKnownToUser(userId: string): Promise<Set<string>> {
   return new Set(rows.map((r) => r.id));
 }
 
+// Every artist the viewer already has in their collection (logged, liked,
+// or marked to listen) — "For You"'s job is to introduce something new, so
+// none of these should ever come back as a pick, no matter how strong the
+// collaborative signal for more of them is.
+async function knownArtistsForUser(userId: string): Promise<Set<string>> {
+  const rows = await prisma.album.findMany({
+    where: {
+      OR: [{ logs: { some: { userId } } }, { status: { some: { userId } } }],
+    },
+    select: { artist: true },
+  });
+  return new Set(rows.map((r) => r.artist));
+}
+
 // Average rating per user, for one specific album.
 async function usersWhoRatedAlbum(
   albumId: string,
@@ -94,7 +111,8 @@ async function usersWhoRatedAlbum(
 async function topAlbumsRatedByUsers(
   userIds: string[],
   excludeIds: Set<string>,
-  limit: number
+  limit: number,
+  excludeArtists: Set<string> = new Set()
 ): Promise<AlbumRow[]> {
   if (userIds.length === 0) return [];
 
@@ -127,7 +145,8 @@ async function topAlbumsRatedByUsers(
   const byId = new Map(albums.map((a) => [a.id, a]));
   return ranked
     .map((r) => byId.get(r.albumId))
-    .filter((a): a is NonNullable<typeof a> => a != null);
+    .filter((a): a is NonNullable<typeof a> => a != null)
+    .filter((a) => !excludeArtists.has(a.artist));
 }
 
 // "similar" — the same artist's other albums, plus albums that other users
@@ -335,19 +354,116 @@ async function liveDiscographyPicks(
   return [...picked.values()];
 }
 
+// Artist-level collaborative filtering: "listeners into your favorite
+// artists are also into these OTHER artists". Spotify's own related-artists
+// endpoint is off-limits to newer API apps and we track no genre data, so
+// this is built entirely from the community's own taste correlations:
+//   1) find "fans" — other users with a positive signal (liked, or rated
+//      >=HIGH_RATING_THRESHOLD) on a local album by one of seedArtists. A
+//      fan who overlaps on more than one seed artist counts for more —
+//      their taste has more in common with the viewer's, not less.
+//   2) look at what ELSE those fans loved, outside seedArtists/excludeArtists
+//      (the viewer's own collection), and rank candidate artists by how many
+//      distinct fans back them, then by total overlap-weighted score.
+// Best-effort like the rest of this module's DB-driven passes: an artist
+// with zero fans locally (e.g. a brand-new catalog) just contributes nothing
+// rather than erroring.
+async function findRelatedArtists(
+  seedArtists: string[],
+  excludeArtists: Set<string>,
+  viewerId: string,
+  limit: number
+): Promise<string[]> {
+  if (seedArtists.length === 0) return [];
+
+  const seedAlbums = await prisma.album.findMany({
+    where: { artist: { in: seedArtists } },
+    select: { id: true, artist: true },
+  });
+  if (seedAlbums.length === 0) return [];
+  const artistBySeedAlbum = new Map(seedAlbums.map((a) => [a.id, a.artist]));
+  const seedAlbumIds = seedAlbums.map((a) => a.id);
+
+  const [logRows, likeRows] = await Promise.all([
+    prisma.listenLog.groupBy({
+      by: ["albumId", "userId"],
+      where: { albumId: { in: seedAlbumIds }, userId: { not: viewerId }, rating: { not: null } },
+      _avg: { rating: true },
+    }),
+    prisma.albumStatus.findMany({
+      where: { albumId: { in: seedAlbumIds }, userId: { not: viewerId }, liked: true },
+      select: { albumId: true, userId: true },
+    }),
+  ]);
+
+  // fanOverlap[userId] = the set of the viewer's seed artists this user is
+  // independently a fan of — its size is that fan's overlap weight below.
+  const fanOverlap = new Map<string, Set<string>>();
+  const markFan = (userId: string, albumId: string) => {
+    const artist = artistBySeedAlbum.get(albumId);
+    if (!artist) return;
+    const set = fanOverlap.get(userId) ?? new Set<string>();
+    set.add(artist);
+    fanOverlap.set(userId, set);
+  };
+  for (const r of logRows) {
+    if (r._avg.rating != null && r._avg.rating >= HIGH_RATING_THRESHOLD) markFan(r.userId, r.albumId);
+  }
+  for (const r of likeRows) markFan(r.userId, r.albumId);
+
+  const fanIds = [...fanOverlap.keys()];
+  if (fanIds.length === 0) return [];
+
+  const [fanLogs, fanLikes] = await Promise.all([
+    prisma.listenLog.findMany({
+      where: { userId: { in: fanIds }, rating: { gte: HIGH_RATING_THRESHOLD } },
+      select: { userId: true, album: { select: { artist: true } } },
+    }),
+    prisma.albumStatus.findMany({
+      where: { userId: { in: fanIds }, liked: true },
+      select: { userId: true, album: { select: { artist: true } } },
+    }),
+  ]);
+
+  const scores = new Map<string, { score: number; fans: Set<string> }>();
+  const addSignal = (userId: string, artist: string) => {
+    if (seedArtists.includes(artist) || excludeArtists.has(artist)) return;
+    const weight = fanOverlap.get(userId)?.size ?? 1;
+    const cur = scores.get(artist) ?? { score: 0, fans: new Set<string>() };
+    cur.score += weight;
+    cur.fans.add(userId);
+    scores.set(artist, cur);
+  };
+  for (const r of fanLogs) addSignal(r.userId, r.album.artist);
+  for (const r of fanLikes) addSignal(r.userId, r.album.artist);
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1].fans.size - a[1].fans.size || b[1].score - a[1].score)
+    .slice(0, limit)
+    .map(([artist]) => artist);
+}
+
 // "For you" — personalized picks built from the viewer's whole positive
 // taste signal, not just one album: liked albums and albums rated above 3.5
-// stars feed both the favorite-artist expansion (local catalog first, then
+// stars feed both the related-artist expansion (collaborative filtering over
+// the community's taste, see findRelatedArtists — local catalog first, then
 // live Spotify lookups once that runs dry) and a collaborative pass over
 // users who share their taste (loved the same albums they loved). Likes are
 // the dominant signal throughout — a rating without a like only reinforces
-// or fills gaps, never outranks an actual like. Falls back to platform-wide
+// or fills gaps, never outranks an actual like. An artist the viewer already
+// has in their collection (see knownArtistsForUser) never comes back as a
+// pick anywhere on this page — the point is to surface something new, not
+// hand back more of what they already follow. Falls back to platform-wide
 // trending picks only for accounts with no positive signal at all — an
 // account with history but no new picks still reports mode "personalized"
 // (with an empty list), since "rate something to get started" would be a
 // wrong thing to tell them.
 export async function getForYouRecommendations(userId: string): Promise<ForYouDTO> {
-  const [signals, known] = await Promise.all([userPositiveSignals(userId), albumsKnownToUser(userId)]);
+  const [signals, known, excludeArtists] = await Promise.all([
+    userPositiveSignals(userId),
+    albumsKnownToUser(userId),
+    knownArtistsForUser(userId),
+  ]);
   const excludeIds = new Set(known);
 
   if (signals.length === 0) {
@@ -382,26 +498,28 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     .map(([artist]) => artist);
   const topArtists = [...likedArtists, ...ratedOnlyArtists].slice(0, 5);
 
-  // Same-artist picks are gathered artist-by-artist, in topArtists' priority
-  // order (liked artists first) and capped per artist — otherwise an artist
-  // that simply has a bigger catalog on file (regardless of like/rating)
-  // would flood the pool and crowd out an artist the viewer actually liked.
-  // This reserved portion stays in priority order (not shuffled), so it
-  // reads consistently as "because you liked X" across refreshes; only the
-  // collaborative/discovery portion below is randomized for variety.
-  const sameArtist = new Map<string, AlbumRow>();
+  // Related-artist picks — found via findRelatedArtists' collaborative
+  // filtering, never an artist already in excludeArtists — are gathered
+  // artist-by-artist, in relevance order (strongest fan overlap first) and
+  // capped per artist, otherwise one related artist with a bigger catalog on
+  // file would flood the pool and crowd out another. This reserved portion
+  // stays in that order (not shuffled), so it reads consistently across
+  // refreshes; only the collaborative/discovery portion below is randomized
+  // for variety.
+  const relatedArtists = await findRelatedArtists(topArtists, excludeArtists, userId, MAX_RELATED_ARTISTS);
+  const related = new Map<string, AlbumRow>();
   const registeredTitlesByArtist = new Map<string, string[]>();
 
-  if (topArtists.length > 0) {
-    const artistCatalog = await prisma.album.findMany({ where: { artist: { in: topArtists } } });
-    for (const a of artistCatalog) {
+  if (relatedArtists.length > 0) {
+    const relatedCatalog = await prisma.album.findMany({ where: { artist: { in: relatedArtists } } });
+    for (const a of relatedCatalog) {
       const list = registeredTitlesByArtist.get(a.artist) ?? [];
       list.push(normalizeAlbumTitle(a.title));
       registeredTitlesByArtist.set(a.artist, list);
     }
 
     const catalogByArtist = new Map<string, AlbumRow[]>();
-    for (const a of artistCatalog) {
+    for (const a of relatedCatalog) {
       if (excludeIds.has(a.id)) continue;
       const ownTitle = normalizeAlbumTitle(a.title);
       const siblings = (registeredTitlesByArtist.get(a.artist) ?? []).filter((t) => t !== ownTitle);
@@ -411,24 +529,26 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
       catalogByArtist.set(a.artist, list);
     }
 
-    for (const artist of topArtists) {
-      if (sameArtist.size >= SAME_ARTIST_RESERVED) break;
+    for (const artist of relatedArtists) {
+      if (related.size >= RELATED_ARTIST_RESERVED) break;
       const releases = (catalogByArtist.get(artist) ?? []).sort(
         (x, y) => (y.releaseDate ?? "").localeCompare(x.releaseDate ?? "")
       );
       let addedForArtist = 0;
       for (const a of releases) {
-        if (addedForArtist >= PER_ARTIST_POOL_LIMIT || sameArtist.size >= SAME_ARTIST_RESERVED) break;
-        sameArtist.set(a.id, a);
+        if (addedForArtist >= PER_RELATED_ARTIST_LIMIT || related.size >= RELATED_ARTIST_RESERVED) break;
+        related.set(a.id, a);
         addedForArtist++;
       }
     }
   }
 
   // Everything else — collaborative picks plus a live Spotify fallback —
-  // feeds a wider discovery pool that gets shuffled on every call.
+  // feeds a wider discovery pool that gets shuffled on every call. Both
+  // exclude excludeArtists too, so an already-known artist can never sneak
+  // back in through the "people who loved this album also loved..." signal.
   const discovery = new Map<string, AlbumRow>();
-  const discoveryExcludeIds = new Set([...excludeIds, ...sameArtist.keys()]);
+  const discoveryExcludeIds = new Set([...excludeIds, ...related.keys()]);
 
   if (seeds.length > 0) {
     const similarUserSets = await Promise.all(
@@ -438,19 +558,20 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     const collaborative = await topAlbumsRatedByUsers(
       similarUsers,
       discoveryExcludeIds,
-      CANDIDATE_POOL_SIZE
+      CANDIDATE_POOL_SIZE,
+      excludeArtists
     );
     for (const a of collaborative) discovery.set(a.id, a);
   }
 
   let discoveryAlbums: (AlbumDTO | SearchResult)[] = [...discovery.values()].map(toAlbumDTO);
 
-  if (discoveryAlbums.length < CANDIDATE_POOL_SIZE && topArtists.length > 0) {
+  if (discoveryAlbums.length < CANDIDATE_POOL_SIZE && relatedArtists.length > 0) {
     const knownMbids = await knownAlbumMbidsForUser(userId);
-    const localMbids = [...sameArtist.values(), ...discovery.values()].map((a) => a.mbid);
+    const localMbids = [...related.values(), ...discovery.values()].map((a) => a.mbid);
     const excludeMbids = new Set([...knownMbids, ...localMbids]);
     const live = await liveDiscographyPicks(
-      topArtists,
+      relatedArtists,
       excludeMbids,
       registeredTitlesByArtist,
       CANDIDATE_POOL_SIZE - discoveryAlbums.length
@@ -458,10 +579,10 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
     discoveryAlbums = discoveryAlbums.concat(live);
   }
 
-  const sameArtistAlbums = [...sameArtist.values()].map(toAlbumDTO);
-  const remainingSlots = Math.max(FOR_YOU_LIMIT - sameArtistAlbums.length, 0);
+  const relatedAlbums = [...related.values()].map(toAlbumDTO);
+  const remainingSlots = Math.max(FOR_YOU_LIMIT - relatedAlbums.length, 0);
   const albums: (AlbumDTO | SearchResult)[] = [
-    ...sameArtistAlbums,
+    ...relatedAlbums,
     ...shuffle(discoveryAlbums).slice(0, remainingSlots),
   ];
 

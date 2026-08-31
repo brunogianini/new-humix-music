@@ -1,0 +1,233 @@
+// Prisma schema for the album-tracking app (local SQLite, multi-user)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(cuid())
+  email           String   @unique
+  passwordHash    String
+  name            String?
+  bio             String?
+  avatarUrl       String?
+  coverUrl        String?
+  favoriteAlbumId String?
+  featuredTab     String   @default("diary") // "diary" | "lists" | "stats"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  statuses         AlbumStatus[]
+  logs             ListenLog[]
+  lists            List[]
+  externalAccounts ExternalAccount[]
+
+  favoriteAlbum     Album?         @relation("FavoriteAlbum", fields: [favoriteAlbumId], references: [id], onDelete: SetNull)
+  followers         Follow[]       @relation("following") // people following ME
+  following         Follow[]       @relation("follower") // people I follow
+  notifications     Notification[] @relation("recipient")
+  notificationsSent Notification[] @relation("actor")
+  pinnedLists       PinnedList[]
+
+  recommendationsSent     AlbumRecommendation[] @relation("RecommendationsSent")
+  recommendationsReceived AlbumRecommendation[] @relation("RecommendationsReceived")
+  shameNotesAuthored      ShameNote[]            @relation("ShameNotesSent")
+  shameNotesReceived      ShameNote[]            @relation("ShameNotesReceived")
+}
+
+model ExternalAccount {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider          String // "SPOTIFY" — SQLite has no native enum support in Prisma
+  providerAccountId String
+  accessToken       String
+  refreshToken      String
+  expiresAt         DateTime
+  scope             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([userId, provider])
+}
+
+model Album {
+  id          String   @id @default(cuid())
+  mbid        String   @unique
+  title       String
+  artist      String
+  coverUrl    String?
+  releaseDate String?
+  createdAt   DateTime @default(now())
+
+  logs             ListenLog[]
+  listEntries      ListEntry[]
+  status           AlbumStatus[]
+  favoritedByUsers User[]                @relation("FavoriteAlbum")
+  notifications    Notification[]
+  tracks           Track[]
+  recommendations  AlbumRecommendation[]
+}
+
+model Track {
+  id          String   @id @default(cuid())
+  albumId     String
+  album       Album    @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  spotifyId   String
+  title       String
+  trackNumber Int
+  durationMs  Int?
+  createdAt   DateTime @default(now())
+
+  @@unique([albumId, spotifyId])
+  @@index([albumId])
+}
+
+model AlbumStatus {
+  id           String   @id @default(cuid())
+  albumId      String
+  album        Album    @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  liked        Boolean  @default(false)
+  wantToListen Boolean  @default(false)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([albumId, userId])
+}
+
+model ListenLog {
+  id         String   @id @default(cuid())
+  albumId    String
+  album      Album    @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating     Int?
+  review     String?
+  listenedOn DateTime @default(now())
+  relisten   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  notifications   Notification[]
+  recommendations AlbumRecommendation[]
+
+  @@index([userId])
+  @@index([albumId])
+}
+
+model List {
+  id            String         @id @default(cuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  createdAt     DateTime       @default(now())
+  entries       ListEntry[]
+  pinnedBy      PinnedList[]
+  notifications Notification[]
+
+  @@index([userId])
+}
+
+model ListEntry {
+  id       String   @id @default(cuid())
+  listId   String
+  list     List     @relation(fields: [listId], references: [id], onDelete: Cascade)
+  albumId  String
+  album    Album    @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  position Int      @default(0)
+  addedAt  DateTime @default(now())
+
+  @@unique([listId, albumId])
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  follower    User     @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+}
+
+model Notification {
+  id          String     @id @default(cuid())
+  recipientId String
+  recipient   User       @relation("recipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actorId     String
+  actor       User       @relation("actor", fields: [actorId], references: [id], onDelete: Cascade)
+  type        String // "FOLLOW" | "LISTEN_LOG" | "LIST_CREATED" | "RECOMMENDATION" | "RECOMMENDATION_COMPLETED" | "SHAME_NOTE"
+  albumId     String?
+  album       Album?     @relation(fields: [albumId], references: [id], onDelete: SetNull)
+  listId      String?
+  list        List?      @relation(fields: [listId], references: [id], onDelete: Cascade)
+  listenLogId String?
+  listenLog   ListenLog? @relation(fields: [listenLogId], references: [id], onDelete: Cascade)
+  read        Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+
+  @@index([recipientId, read])
+  @@index([recipientId, createdAt])
+}
+
+model PinnedList {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listId    String
+  list      List     @relation(fields: [listId], references: [id], onDelete: Cascade)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listId])
+  @@index([userId])
+}
+
+// A user recommends an album to a mutual-follow friend. The friend has 7 days
+// (createdAt -> expiresAt) to listen and write a review; status is always
+// derived (never stored) from listenLogId/expiresAt/shameNote — see
+// src/lib/friendship.ts, same lazy-compute approach as src/lib/streak.ts.
+model AlbumRecommendation {
+  id          String     @id @default(cuid())
+  fromUserId  String
+  fromUser    User       @relation("RecommendationsSent", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUserId    String
+  toUser      User       @relation("RecommendationsReceived", fields: [toUserId], references: [id], onDelete: Cascade)
+  albumId     String
+  album       Album      @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  message     String?
+  createdAt   DateTime   @default(now())
+  expiresAt   DateTime
+  listenLogId String? // not @unique: one review can fulfill recommendations from several friends
+  listenLog   ListenLog? @relation(fields: [listenLogId], references: [id], onDelete: SetNull)
+  completedAt DateTime?
+  shameNote   ShameNote?
+
+  @@index([toUserId])
+  @@index([fromUserId])
+  @@index([albumId])
+}
+
+// Left by the recommender on the recipient's profile once a recommendation
+// has expired unfulfilled — visible publicly on that profile.
+model ShameNote {
+  id               String              @id @default(cuid())
+  recommendationId String              @unique
+  recommendation   AlbumRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  authorId         String
+  author           User                @relation("ShameNotesSent", fields: [authorId], references: [id], onDelete: Cascade)
+  targetUserId     String
+  targetUser       User                @relation("ShameNotesReceived", fields: [targetUserId], references: [id], onDelete: Cascade)
+  text             String
+  createdAt        DateTime            @default(now())
+
+  @@index([targetUserId])
+}

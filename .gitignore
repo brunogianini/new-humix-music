@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# local sqlite database (personal library data)
+/prisma/dev.db
+/prisma/dev.db-journal
+
+# user-uploaded avatar/cover images
+/public/uploads

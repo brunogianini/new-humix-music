@@ -1,6 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { getEffectiveUserAlbumRating } from "@/lib/albumAggregate";
-import { getArtistDiscography, type SearchResult } from "@/lib/spotify";
+import {
+  getArtistDiscography,
+  getArtistGenres,
+  searchArtistsByGenre,
+  type SearchResult,
+} from "@/lib/spotify";
 import type { AlbumDTO, ForYouDTO, RelatedAlbumsDTO } from "@/lib/types";
 
 // Rating scale is 0-10 (half-stars, see StarRating). >=7 is ~3.5+ stars,
@@ -33,6 +38,10 @@ const SPOTIFY_FALLBACK_ARTISTS = 3;
 const MAX_RELATED_ARTISTS = 6;
 const PER_RELATED_ARTIST_LIMIT = 2;
 const RELATED_ARTIST_RESERVED = Math.ceil(FOR_YOU_LIMIT * 0.5);
+// How many of the viewer's own top artists we resolve Spotify genres for,
+// when findRelatedArtists' local collaborative signal falls short. Kept
+// small since each lookup is a real Spotify call.
+const GENRE_LOOKUP_ARTISTS = 3;
 
 function shuffle<T>(items: T[]): T[] {
   const arr = [...items];
@@ -443,12 +452,63 @@ async function findRelatedArtists(
     .map(([artist]) => artist);
 }
 
+// Content-based fallback for related-artist discovery: findRelatedArtists
+// only finds anything when some OTHER local listener already overlaps with
+// the viewer's favorite artists, which starves on a small or young
+// community — every under-covered viewer would otherwise collapse into the
+// exact same platform-wide trending fallback, defeating the point of a
+// "For You" page. This depends only on the viewer's OWN top artists' Spotify
+// genre tags, never on any other user having logged anything, so it keeps
+// the page personal even alone on the platform. Genres are ranked by how
+// many of the viewer's seed artists share them (a genre two of their
+// favorites share is a stronger signal than one only one of them has), and
+// each genre's search results are pulled in that order until `limit` is hit.
+async function findGenreRelatedArtists(
+  seedArtists: string[],
+  excludeArtists: Set<string>,
+  limit: number
+): Promise<string[]> {
+  if (limit <= 0 || seedArtists.length === 0) return [];
+
+  const genreLookups = await Promise.allSettled(
+    seedArtists.slice(0, GENRE_LOOKUP_ARTISTS).map((name) => getArtistGenres(name))
+  );
+
+  const genreCounts = new Map<string, number>();
+  for (const r of genreLookups) {
+    if (r.status !== "fulfilled") continue;
+    for (const genre of r.value) genreCounts.set(genre, (genreCounts.get(genre) ?? 0) + 1);
+  }
+  const rankedGenres = [...genreCounts.entries()].sort((a, b) => b[1] - a[1]).map(([g]) => g);
+  if (rankedGenres.length === 0) return [];
+
+  const excludeNames = new Set([...excludeArtists, ...seedArtists]);
+  const picked: string[] = [];
+  for (const genre of rankedGenres) {
+    if (picked.length >= limit) break;
+    const candidates = await searchArtistsByGenre(
+      genre,
+      new Set([...excludeNames, ...picked]),
+      limit - picked.length
+    );
+    for (const c of candidates) {
+      if (picked.length >= limit) break;
+      picked.push(c.name);
+    }
+  }
+  return picked;
+}
+
 // "For you" — personalized picks built from the viewer's whole positive
 // taste signal, not just one album: liked albums and albums rated above 3.5
 // stars feed both the related-artist expansion (collaborative filtering over
-// the community's taste, see findRelatedArtists — local catalog first, then
-// live Spotify lookups once that runs dry) and a collaborative pass over
-// users who share their taste (loved the same albums they loved). Likes are
+// the community's taste via findRelatedArtists, topped up with content-based
+// genre matches via findGenreRelatedArtists whenever the community signal
+// falls short — local catalog first, then live Spotify lookups once that
+// runs dry) and a collaborative pass over users who share their taste (loved
+// the same albums they loved). The genre fallback is what keeps this page
+// personal even when few other users overlap with the viewer's taste — it
+// depends only on the viewer's own favorite artists. Likes are
 // the dominant signal throughout — a rating without a like only reinforces
 // or fills gaps, never outranks an actual like. An artist the viewer already
 // has in their collection (see knownArtistsForUser) never comes back as a
@@ -506,7 +566,15 @@ export async function getForYouRecommendations(userId: string): Promise<ForYouDT
   // stays in that order (not shuffled), so it reads consistently across
   // refreshes; only the collaborative/discovery portion below is randomized
   // for variety.
-  const relatedArtists = await findRelatedArtists(topArtists, excludeArtists, userId, MAX_RELATED_ARTISTS);
+  let relatedArtists = await findRelatedArtists(topArtists, excludeArtists, userId, MAX_RELATED_ARTISTS);
+  if (relatedArtists.length < MAX_RELATED_ARTISTS && topArtists.length > 0) {
+    const genreRelated = await findGenreRelatedArtists(
+      topArtists,
+      new Set([...excludeArtists, ...topArtists, ...relatedArtists]),
+      MAX_RELATED_ARTISTS - relatedArtists.length
+    );
+    relatedArtists = [...relatedArtists, ...genreRelated];
+  }
   const related = new Map<string, AlbumRow>();
   const registeredTitlesByArtist = new Map<string, string[]>();
 

@@ -29,7 +29,10 @@ export type TrackInfo = {
 };
 
 type SpotifyImage = { url: string };
-type SpotifyArtistRef = { id: string; name: string };
+// `genres` is only ever populated on a full artist object (search results,
+// GET /artists/{id}) — album.artists entries are a stripped-down ref and
+// never carry it, hence optional.
+type SpotifyArtistRef = { id: string; name: string; genres?: string[] };
 type SpotifyAlbum = {
   id: string;
   name: string;
@@ -175,6 +178,45 @@ async function searchArtistByName(name: string): Promise<ArtistInfo | null> {
   const data = (await res.json()) as SpotifyArtistSearchResponse;
   const a = data.artists?.items?.[0];
   return a ? { id: a.id, name: a.name } : null;
+}
+
+// Spotify's genre tags for an artist — used for content-based "related
+// artist" discovery (see findGenreRelatedArtists in recommendations.ts) when
+// there's no other local listener to draw a collaborative signal from.
+// Genres are freeform and artist-specific (not the broad rock/pop/jazz kind)
+// so overlap between two artists is a meaningfully strong signal.
+export async function getArtistGenres(name: string): Promise<string[]> {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+
+  const res = await fetchWithRetry(
+    `/search?q=${encodeURIComponent(`artist:"${trimmed}"`)}&type=artist&limit=1`
+  );
+  if (!res.ok) return [];
+
+  const data = (await res.json()) as SpotifyArtistSearchResponse;
+  return data.artists?.items?.[0]?.genres ?? [];
+}
+
+// Artists tagged with a given genre, most-followed/relevant first (Spotify's
+// own search ranking) — the candidate pool for genre-based discovery.
+export async function searchArtistsByGenre(
+  genre: string,
+  excludeNames: Set<string>,
+  limit: number
+): Promise<ArtistInfo[]> {
+  if (limit <= 0) return [];
+
+  const res = await fetchWithRetry(
+    `/search?q=${encodeURIComponent(`genre:"${genre}"`)}&type=artist&limit=${Math.min(limit + excludeNames.size, 50)}`
+  );
+  if (!res.ok) return [];
+
+  const data = (await res.json()) as SpotifyArtistSearchResponse;
+  return (data.artists?.items ?? [])
+    .filter((a) => a.name && !excludeNames.has(a.name))
+    .slice(0, limit)
+    .map((a) => ({ id: a.id, name: a.name }));
 }
 
 // Discography for an artist's page. When the caller already knows the

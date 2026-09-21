@@ -40,10 +40,13 @@ model User {
   shameNotesAuthored      ShameNote[]           @relation("ShameNotesSent")
   shameNotesReceived      ShameNote[]           @relation("ShameNotesReceived")
 
-  listeningGroupsCreated    ListeningGroup[]         @relation("ListeningGroupCreator")
-  listeningGroupMemberships ListeningGroupMember[]   @relation("ListeningGroupMemberUser")
-  listeningSessionsCreated  ListeningSession[]       @relation("ListeningSessionCreator")
-  listeningSessionRatings   ListeningSessionRating[] @relation("ListeningSessionRatingUser")
+  listeningGroupsCreated     ListeningGroup[]         @relation("ListeningGroupCreator")
+  listeningGroupMemberships  ListeningGroupMember[]   @relation("ListeningGroupMemberUser")
+  listeningSessionsCreated   ListeningSession[]       @relation("ListeningSessionCreator")
+  listeningSessionRatings    ListeningSessionRating[] @relation("ListeningSessionRatingUser")
+  sessionVotesOpened         ListeningSessionVote[]   @relation("SessionVoteOpener")
+  sessionVoteCandidatesAdded SessionVoteCandidate[]   @relation("SessionVoteCandidateProposer")
+  sessionVoteBallotsCast     SessionVoteBallot[]      @relation("SessionVoteBallotCaster")
 }
 
 model ExternalAccount {
@@ -71,14 +74,15 @@ model Album {
   releaseDate String?
   createdAt   DateTime @default(now())
 
-  logs              ListenLog[]
-  listEntries       ListEntry[]
-  status            AlbumStatus[]
-  favoritedByUsers  User[]                @relation("FavoriteAlbum")
-  notifications     Notification[]
-  tracks            Track[]
-  recommendations   AlbumRecommendation[]
-  listeningSessions ListeningSession[]
+  logs                  ListenLog[]
+  listEntries           ListEntry[]
+  status                AlbumStatus[]
+  favoritedByUsers      User[]                 @relation("FavoriteAlbum")
+  notifications         Notification[]
+  tracks                Track[]
+  recommendations       AlbumRecommendation[]
+  listeningSessions     ListeningSession[]
+  sessionVoteCandidates SessionVoteCandidate[]
 }
 
 model Track {
@@ -282,6 +286,7 @@ model ListeningSession {
   createdAt    DateTime       @default(now())
 
   ratings ListeningSessionRating[]
+  votes   ListeningSessionVote[]
 
   @@index([groupId])
   @@index([albumId])
@@ -302,4 +307,59 @@ model ListeningSessionRating {
 
   @@unique([sessionId, userId])
   @@index([sessionId])
+}
+
+// A poll to replace a session's album, opened by whoever created the
+// session or the group's owner (see canManageSession in src/lib/groups.ts).
+// At most one open (closedAt == null) vote per session is allowed — enforced
+// in the API, not the DB, since Prisma has no cross-db partial unique index.
+// Closes automatically once every group member has cast a ballot; the
+// candidate with the most ballots wins (ties broken at random) and becomes
+// the session's album.
+model ListeningSessionVote {
+  id             String           @id @default(cuid())
+  sessionId      String
+  session        ListeningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  openedById     String
+  openedBy       User             @relation("SessionVoteOpener", fields: [openedById], references: [id], onDelete: Cascade)
+  createdAt      DateTime         @default(now())
+  closedAt       DateTime?
+  winningAlbumId String?
+
+  candidates SessionVoteCandidate[]
+  ballots    SessionVoteBallot[]
+
+  @@index([sessionId])
+}
+
+model SessionVoteCandidate {
+  id           String               @id @default(cuid())
+  voteId       String
+  vote         ListeningSessionVote @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  albumId      String
+  album        Album                @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  proposedById String
+  proposedBy   User                 @relation("SessionVoteCandidateProposer", fields: [proposedById], references: [id], onDelete: Cascade)
+  createdAt    DateTime             @default(now())
+
+  ballots SessionVoteBallot[]
+
+  @@unique([voteId, albumId])
+  @@index([voteId])
+}
+
+model SessionVoteBallot {
+  id          String               @id @default(cuid())
+  voteId      String
+  vote        ListeningSessionVote @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  candidateId String
+  candidate   SessionVoteCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                 @relation("SessionVoteBallotCaster", fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@unique([voteId, userId])
+  @@index([voteId])
+  @@index([candidateId])
 }

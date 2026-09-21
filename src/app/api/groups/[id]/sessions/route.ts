@@ -2,13 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUserId } from "@/lib/apiAuth";
 import { sessionCreateSchema } from "@/lib/validation";
 import { prisma } from "@/lib/prisma";
-import { isGroupMember, pickAlbumForGroup, toSessionDTO } from "@/lib/groups";
-
-const SESSION_INCLUDE = {
-  album: true,
-  createdBy: { select: { id: true, name: true, avatarUrl: true } },
-  ratings: { select: { userId: true, rating: true, review: true } },
-} as const;
+import { SESSION_INCLUDE, isGroupMember, pickAlbumForGroup, toSessionDTO } from "@/lib/groups";
 
 export async function POST(
   req: NextRequest,
@@ -29,7 +23,10 @@ export async function POST(
     return NextResponse.json({ error: "Data inválida." }, { status: 400 });
   }
 
-  const group = await prisma.listeningGroup.findUnique({ where: { id: groupId } });
+  const group = await prisma.listeningGroup.findUnique({
+    where: { id: groupId },
+    select: { createdById: true, _count: { select: { members: true } } },
+  });
   if (!group) return NextResponse.json({ error: "Grupo não encontrado." }, { status: 404 });
   if (!(await isGroupMember(groupId, userId))) {
     return NextResponse.json({ error: "Você não é membro desse grupo." }, { status: 403 });
@@ -51,5 +48,7 @@ export async function POST(
     include: SESSION_INCLUDE,
   });
 
-  return NextResponse.json({ session: toSessionDTO(session, userId) });
+  return NextResponse.json({
+    session: toSessionDTO(session, userId, group.createdById, group._count.members),
+  });
 }

@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowLeft, CalendarPlus, Plus, Trash2, UserPlus, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CalendarPlus,
+  ListChecks,
+  Plus,
+  Shuffle,
+  Trash2,
+  UserPlus,
+  X,
+} from "lucide-react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useLibrary } from "@/context/LibraryContext";
 import { useAuth } from "@/context/AuthContext";
@@ -11,8 +20,10 @@ import type {
   GroupDetailDTO,
   GroupSessionDTO,
   GroupSummaryDTO,
+  SessionVoteDTO,
   UserSummaryDTO,
 } from "@/lib/types";
+import type { SearchResult } from "@/lib/spotify";
 import type { AlbumLike } from "../AlbumCard";
 
 function isPastDate(iso: string): boolean {
@@ -114,42 +125,222 @@ function AddMemberBox({
   );
 }
 
+function ProposeCandidateBox({ onPropose }: { onPropose: (result: SearchResult) => void }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+
+  useEffect(() => {
+    if (!query.trim()) return;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      void fetch(`/api/search?q=${encodeURIComponent(query)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled) setResults(data.results ?? []);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [query]);
+
+  function handleQueryChange(value: string) {
+    setQuery(value);
+    if (!value.trim()) setResults([]);
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <input
+        value={query}
+        onChange={(e) => handleQueryChange(e.target.value)}
+        placeholder="Buscar álbum pra propor…"
+        className="rounded bg-neutral-800 px-3 py-2 text-xs outline-none ring-1 ring-white/10 focus:ring-accent/50"
+      />
+      {results.length > 0 && (
+        <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto">
+          {results.slice(0, 8).map((r) => (
+            <li key={r.mbid} className="flex items-center gap-2 px-1">
+              <AlbumCover album={r} size={28} />
+              <span className="min-w-0 flex-1 truncate text-xs text-neutral-200">
+                {r.title} — {r.artist}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onPropose(r);
+                  setQuery("");
+                  setResults([]);
+                }}
+                className="shrink-0 rounded-full bg-accent px-2 py-1 text-[11px] font-medium text-neutral-950 hover:bg-neutral-300"
+              >
+                Propor
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function VotePanel({
+  vote,
+  canManage,
+  onOpenAlbum,
+  onPropose,
+  onCastBallot,
+  onCancel,
+}: {
+  vote: SessionVoteDTO;
+  canManage: boolean;
+  onOpenAlbum: (album: AlbumLike) => void;
+  onPropose: (result: SearchResult) => void;
+  onCastBallot: (candidateId: string) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg bg-neutral-950 p-3 ring-1 ring-accent/30">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-accent-soft">
+          Votação aberta — {vote.ballotsCast}/{vote.totalMembers} votaram
+        </p>
+        {canManage && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-xs text-neutral-500 hover:text-red-400"
+          >
+            Cancelar votação
+          </button>
+        )}
+      </div>
+
+      {vote.candidates.length === 0 ? (
+        <p className="text-xs text-neutral-500">Ninguém propôs um álbum ainda.</p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {vote.candidates.map((c) => (
+            <li
+              key={c.id}
+              className={`flex items-center gap-2 rounded-lg p-2 ring-1 ${
+                c.votedByMe ? "ring-accent" : "ring-white/5"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => onOpenAlbum(c.album)}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <AlbumCover album={c.album} size={32} />
+                <div className="min-w-0">
+                  <p className="truncate text-xs text-neutral-100">{c.album.title}</p>
+                  <p className="truncate text-[11px] text-neutral-500">
+                    {c.album.artist} · proposto por {c.proposedBy.name || "alguém"}
+                  </p>
+                </div>
+              </button>
+              <span className="shrink-0 text-xs text-neutral-400">{c.voteCount}</span>
+              <button
+                type="button"
+                onClick={() => onCastBallot(c.id)}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${
+                  c.votedByMe
+                    ? "bg-accent text-neutral-950"
+                    : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                }`}
+              >
+                {c.votedByMe ? "Votado" : "Votar"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <ProposeCandidateBox onPropose={onPropose} />
+    </div>
+  );
+}
+
 function SessionRow({
   session,
   onOpenAlbum,
   onRate,
+  onReroll,
+  onStartVote,
+  onCancelVote,
+  onProposeCandidate,
+  onCastBallot,
 }: {
   session: GroupSessionDTO;
   onOpenAlbum: (album: AlbumLike) => void;
   onRate: (sessionId: string, rating: number | null) => void;
+  onReroll: (sessionId: string) => void;
+  onStartVote: (sessionId: string) => void;
+  onCancelVote: (sessionId: string) => void;
+  onProposeCandidate: (sessionId: string, result: SearchResult) => void;
+  onCastBallot: (sessionId: string, candidateId: string) => void;
 }) {
   const date = new Date(session.scheduledFor);
   const isPast = isPastDate(session.scheduledFor);
 
   return (
-    <li className="flex flex-col gap-3 rounded-lg bg-neutral-900 p-3 ring-1 ring-white/5 sm:flex-row sm:items-center">
-      <button
-        type="button"
-        onClick={() => onOpenAlbum(session.album)}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
-      >
-        <AlbumCover album={session.album} />
-        <div className="min-w-0">
-          <p className="truncate text-sm text-neutral-100">{session.album.title}</p>
-          <p className="truncate text-xs text-neutral-500">{session.album.artist}</p>
-          <p className="text-xs text-neutral-600">
-            {date.toLocaleString("pt-BR", { dateStyle: "medium", timeStyle: "short" })}
-            {!isPast && <span className="ml-1 text-accent-soft">· agendada</span>}
+    <li className="flex flex-col gap-3 rounded-lg bg-neutral-900 p-3 ring-1 ring-white/5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <button
+          type="button"
+          onClick={() => onOpenAlbum(session.album)}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        >
+          <AlbumCover album={session.album} />
+          <div className="min-w-0">
+            <p className="truncate text-sm text-neutral-100">{session.album.title}</p>
+            <p className="truncate text-xs text-neutral-500">{session.album.artist}</p>
+            <p className="text-xs text-neutral-600">
+              {date.toLocaleString("pt-BR", { dateStyle: "medium", timeStyle: "short" })}
+              {!isPast && <span className="ml-1 text-accent-soft">· agendada</span>}
+            </p>
+          </div>
+        </button>
+        <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end">
+          <StarRating value={session.myRating} onChange={(v) => onRate(session.id, v)} size={16} />
+          <p className="text-xs text-neutral-500">
+            média do grupo: {session.avgRating != null ? ratingToText(session.avgRating) : "—"} (
+            {session.ratings.length})
           </p>
         </div>
-      </button>
-      <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end">
-        <StarRating value={session.myRating} onChange={(v) => onRate(session.id, v)} size={16} />
-        <p className="text-xs text-neutral-500">
-          média do grupo: {session.avgRating != null ? ratingToText(session.avgRating) : "—"} (
-          {session.ratings.length})
-        </p>
       </div>
+
+      {session.canManage && !session.vote && (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onReroll(session.id)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-neutral-800 px-2.5 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+          >
+            <Shuffle size={12} /> Sortear outro
+          </button>
+          <button
+            type="button"
+            onClick={() => onStartVote(session.id)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-neutral-800 px-2.5 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+          >
+            <ListChecks size={12} /> Iniciar votação
+          </button>
+        </div>
+      )}
+
+      {session.vote && (
+        <VotePanel
+          vote={session.vote}
+          canManage={session.canManage}
+          onOpenAlbum={onOpenAlbum}
+          onPropose={(r) => onProposeCandidate(session.id, r)}
+          onCastBallot={(candidateId) => onCastBallot(session.id, candidateId)}
+          onCancel={() => onCancelVote(session.id)}
+        />
+      )}
     </li>
   );
 }
@@ -195,7 +386,7 @@ function GroupDetail({
   onOpenAlbum: (album: AlbumLike) => void;
   onDeleted: () => void;
 }) {
-  const { notify } = useLibrary();
+  const { notify, ensureAlbum } = useLibrary();
   const [group, setGroup] = useState<GroupDetailDTO | null>(null);
   const [addingMember, setAddingMember] = useState(false);
   const [schedulingSession, setSchedulingSession] = useState(false);
@@ -255,6 +446,75 @@ function GroupDetail({
     } catch (err) {
       notify(err instanceof ApiError ? err.message : "Não foi possível salvar a nota.");
       await load();
+    }
+  }
+
+  function replaceSession(updated: GroupSessionDTO) {
+    setGroup((g) =>
+      g ? { ...g, sessions: g.sessions.map((s) => (s.id === updated.id ? updated : s)) } : g
+    );
+  }
+
+  async function handleReroll(sessionId: string) {
+    try {
+      const data = await apiFetch<{ session: GroupSessionDTO }>(
+        `/api/groups/${groupId}/sessions/${sessionId}/reroll`,
+        { method: "POST" }
+      );
+      replaceSession(data.session);
+      notify("Novo álbum sorteado!");
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Não foi possível sortear outro álbum.");
+    }
+  }
+
+  async function handleStartVote(sessionId: string) {
+    try {
+      const data = await apiFetch<{ session: GroupSessionDTO }>(
+        `/api/groups/${groupId}/sessions/${sessionId}/vote`,
+        { method: "POST" }
+      );
+      replaceSession(data.session);
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Não foi possível iniciar a votação.");
+    }
+  }
+
+  async function handleCancelVote(sessionId: string) {
+    try {
+      const data = await apiFetch<{ session: GroupSessionDTO }>(
+        `/api/groups/${groupId}/sessions/${sessionId}/vote`,
+        { method: "DELETE" }
+      );
+      replaceSession(data.session);
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Não foi possível cancelar a votação.");
+    }
+  }
+
+  async function handleProposeCandidate(sessionId: string, result: SearchResult) {
+    try {
+      const album = await ensureAlbum(result);
+      const data = await apiFetch<{ session: GroupSessionDTO }>(
+        `/api/groups/${groupId}/sessions/${sessionId}/vote/candidates`,
+        { method: "POST", body: JSON.stringify({ albumId: album.id }) }
+      );
+      replaceSession(data.session);
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Não foi possível propor esse álbum.");
+    }
+  }
+
+  async function handleCastBallot(sessionId: string, candidateId: string) {
+    try {
+      const data = await apiFetch<{ session: GroupSessionDTO }>(
+        `/api/groups/${groupId}/sessions/${sessionId}/vote/ballots`,
+        { method: "POST", body: JSON.stringify({ candidateId }) }
+      );
+      replaceSession(data.session);
+      if (!data.session.vote) notify("Votação encerrada — álbum definido!");
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : "Não foi possível registrar seu voto.");
     }
   }
 
@@ -404,7 +664,17 @@ function GroupDetail({
         ) : (
           <ul className="flex flex-col gap-2">
             {group.sessions.map((s) => (
-              <SessionRow key={s.id} session={s} onOpenAlbum={onOpenAlbum} onRate={handleRate} />
+              <SessionRow
+                key={s.id}
+                session={s}
+                onOpenAlbum={onOpenAlbum}
+                onRate={handleRate}
+                onReroll={handleReroll}
+                onStartVote={handleStartVote}
+                onCancelVote={handleCancelVote}
+                onProposeCandidate={handleProposeCandidate}
+                onCastBallot={handleCastBallot}
+              />
             ))}
           </ul>
         )}

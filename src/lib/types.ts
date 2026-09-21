@@ -169,6 +169,23 @@ export type GroupMemberDTO = {
   joinedAt: string;
 };
 
+export type SessionVoteCandidateDTO = {
+  id: string;
+  album: AlbumDTO;
+  proposedBy: { id: string; name: string | null; avatarUrl: string | null };
+  voteCount: number;
+  votedByMe: boolean;
+};
+
+export type SessionVoteDTO = {
+  id: string;
+  openedBy: { id: string; name: string | null; avatarUrl: string | null };
+  createdAt: string;
+  totalMembers: number;
+  ballotsCast: number;
+  candidates: SessionVoteCandidateDTO[];
+};
+
 export type GroupSessionDTO = {
   id: string;
   scheduledFor: string;
@@ -178,6 +195,8 @@ export type GroupSessionDTO = {
   ratings: { userId: string; rating: number; review: string | null }[];
   avgRating: number | null;
   myRating: number | null;
+  canManage: boolean;
+  vote: SessionVoteDTO | null;
 };
 
 // One row per distinct album that has come up in at least one of the

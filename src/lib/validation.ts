@@ -92,3 +92,11 @@ export const sessionRatingSchema = z.object({
   rating: z.number().int().min(0).max(10),
   review: z.string().trim().max(500).nullable().optional(),
 });
+
+export const voteCandidateAddSchema = z.object({
+  albumId: z.string().min(1),
+});
+
+export const voteBallotCastSchema = z.object({
+  candidateId: z.string().min(1),
+});

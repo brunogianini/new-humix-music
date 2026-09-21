@@ -74,3 +74,21 @@ export const recommendationCreateSchema = z.object({
 export const shameNoteCreateSchema = z.object({
   text: z.string().trim().min(1).max(280),
 });
+
+export const groupCreateSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().max(500).nullable().optional(),
+});
+
+export const groupMemberAddSchema = z.object({
+  userId: z.string().min(1),
+});
+
+export const sessionCreateSchema = z.object({
+  scheduledFor: z.string().min(1),
+});
+
+export const sessionRatingSchema = z.object({
+  rating: z.number().int().min(0).max(10),
+  review: z.string().trim().max(500).nullable().optional(),
+});

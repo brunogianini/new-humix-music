@@ -162,6 +162,57 @@ export type PublicProfileDTO = {
   shameNotes: ShameNoteDTO[];
 };
 
+export type GroupMemberDTO = {
+  id: string;
+  name: string | null;
+  avatarUrl: string | null;
+  joinedAt: string;
+};
+
+export type GroupSessionDTO = {
+  id: string;
+  scheduledFor: string;
+  createdAt: string;
+  album: AlbumDTO;
+  createdBy: { id: string; name: string | null; avatarUrl: string | null };
+  ratings: { userId: string; rating: number; review: string | null }[];
+  avgRating: number | null;
+  myRating: number | null;
+};
+
+// One row per distinct album that has come up in at least one of the
+// group's sessions, with the average across every rating any member gave it
+// in any of the group's sessions for that album (not just one session).
+export type GroupAlbumRatingDTO = {
+  album: AlbumDTO;
+  avgRating: number | null;
+  ratingCount: number;
+  sessionCount: number;
+};
+
+export type GroupSummaryDTO = {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  createdById: string;
+  memberCount: number;
+  sessionCount: number;
+  avatarUrls: (string | null)[];
+};
+
+export type GroupDetailDTO = {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  createdById: string;
+  isOwner: boolean;
+  members: GroupMemberDTO[];
+  sessions: GroupSessionDTO[];
+  albumRatings: GroupAlbumRatingDTO[];
+};
+
 export type PlatformStatsDTO = {
   topAlbumsByYear: {
     year: number;

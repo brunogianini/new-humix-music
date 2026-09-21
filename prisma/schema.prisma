@@ -37,8 +37,13 @@ model User {
 
   recommendationsSent     AlbumRecommendation[] @relation("RecommendationsSent")
   recommendationsReceived AlbumRecommendation[] @relation("RecommendationsReceived")
-  shameNotesAuthored      ShameNote[]            @relation("ShameNotesSent")
-  shameNotesReceived      ShameNote[]            @relation("ShameNotesReceived")
+  shameNotesAuthored      ShameNote[]           @relation("ShameNotesSent")
+  shameNotesReceived      ShameNote[]           @relation("ShameNotesReceived")
+
+  listeningGroupsCreated    ListeningGroup[]         @relation("ListeningGroupCreator")
+  listeningGroupMemberships ListeningGroupMember[]   @relation("ListeningGroupMemberUser")
+  listeningSessionsCreated  ListeningSession[]       @relation("ListeningSessionCreator")
+  listeningSessionRatings   ListeningSessionRating[] @relation("ListeningSessionRatingUser")
 }
 
 model ExternalAccount {
@@ -66,13 +71,14 @@ model Album {
   releaseDate String?
   createdAt   DateTime @default(now())
 
-  logs             ListenLog[]
-  listEntries      ListEntry[]
-  status           AlbumStatus[]
-  favoritedByUsers User[]                @relation("FavoriteAlbum")
-  notifications    Notification[]
-  tracks           Track[]
-  recommendations  AlbumRecommendation[]
+  logs              ListenLog[]
+  listEntries       ListEntry[]
+  status            AlbumStatus[]
+  favoritedByUsers  User[]                @relation("FavoriteAlbum")
+  notifications     Notification[]
+  tracks            Track[]
+  recommendations   AlbumRecommendation[]
+  listeningSessions ListeningSession[]
 }
 
 model Track {
@@ -231,4 +237,69 @@ model ShameNote {
   createdAt        DateTime            @default(now())
 
   @@index([targetUserId])
+}
+
+// A shared listening group. Only the creator manages membership; any member
+// can schedule sessions and rate them.
+model ListeningGroup {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdById String
+  createdBy   User     @relation("ListeningGroupCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  members  ListeningGroupMember[]
+  sessions ListeningSession[]
+
+  @@index([createdById])
+}
+
+model ListeningGroupMember {
+  id       String         @id @default(cuid())
+  groupId  String
+  group    ListeningGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User           @relation("ListeningGroupMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt DateTime       @default(now())
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+// A scheduled joint listen. The album is picked at creation time, at random,
+// from the pool of albums the group's members have liked, want to listen to,
+// or have already logged — see src/lib/groups.ts (pickAlbumForGroup).
+model ListeningSession {
+  id           String         @id @default(cuid())
+  groupId      String
+  group        ListeningGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  scheduledFor DateTime
+  albumId      String
+  album        Album          @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  createdById  String
+  createdBy    User           @relation("ListeningSessionCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+
+  ratings ListeningSessionRating[]
+
+  @@index([groupId])
+  @@index([albumId])
+}
+
+// One member's rating for a session's album. The group's average rating for
+// an album (across all its sessions) is derived from these, never stored.
+model ListeningSessionRating {
+  id        String           @id @default(cuid())
+  sessionId String
+  session   ListeningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User             @relation("ListeningSessionRatingUser", fields: [userId], references: [id], onDelete: Cascade)
+  rating    Int
+  review    String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([sessionId, userId])
+  @@index([sessionId])
 }

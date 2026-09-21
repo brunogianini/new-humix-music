@@ -7,6 +7,7 @@ import {
   ListMusic,
   LogOut,
   NotebookText,
+  Radio,
   Search,
   Settings,
   Sparkles,
@@ -24,12 +25,22 @@ import { ForYouView } from "./views/ForYouView";
 import { ProfileView } from "./views/ProfileView";
 import { ArtistView } from "./views/ArtistView";
 import { FriendsView } from "./views/FriendsView";
+import { GroupsView } from "./views/GroupsView";
 import { SettingsView } from "./SettingsView";
 import { TopBar } from "./TopBar";
 import { AlbumModal } from "./AlbumModal";
 import type { AlbumLike, ArtistRef } from "./AlbumCard";
 
-type Tab = "home" | "search" | "forYou" | "diary" | "lists" | "friends" | "profile" | "settings";
+type Tab =
+  | "home"
+  | "search"
+  | "forYou"
+  | "diary"
+  | "lists"
+  | "friends"
+  | "groups"
+  | "profile"
+  | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Home }[] = [
   { id: "home", label: "Início", icon: Home },
@@ -38,6 +49,7 @@ const TABS: { id: Tab; label: string; icon: typeof Home }[] = [
   { id: "diary", label: "Diário", icon: NotebookText },
   { id: "lists", label: "Listas", icon: ListMusic },
   { id: "friends", label: "Amigos", icon: Users },
+  { id: "groups", label: "Grupos", icon: Radio },
   { id: "profile", label: "Perfil", icon: UserRound },
   { id: "settings", label: "Configurações", icon: Settings },
 ];
@@ -122,6 +134,7 @@ export function AppShell() {
               <ListsView onOpenAlbum={setActiveAlbum} onOpenArtist={setActiveArtist} />
             )}
             {tab === "friends" && <FriendsView onOpenAlbum={setActiveAlbum} />}
+            {tab === "groups" && <GroupsView onOpenAlbum={setActiveAlbum} />}
             {tab === "profile" && <ProfileView />}
             {tab === "settings" && <SettingsView />}
           </div>

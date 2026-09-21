@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, CalendarPlus, Plus, Trash2, UserPlus, X } from "lucide-react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useLibrary } from "@/context/LibraryContext";
+import { useAuth } from "@/context/AuthContext";
 import { StarRating, ratingToText } from "@/components/StarRating";
 import type {
   GroupAlbumRatingDTO,
@@ -29,32 +30,35 @@ function AlbumCover({ album, size = 44 }: { album: AlbumLike; size?: number }) {
   );
 }
 
-function AddMemberBox({ groupId, onAdded }: { groupId: string; onAdded: () => void }) {
+function AddMemberBox({
+  groupId,
+  existingMemberIds,
+  onAdded,
+}: {
+  groupId: string;
+  existingMemberIds: string[];
+  onAdded: () => void;
+}) {
   const { notify } = useLibrary();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<UserSummaryDTO[]>([]);
+  const { user } = useAuth();
+  const [candidates, setCandidates] = useState<UserSummaryDTO[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!query.trim()) return;
     let cancelled = false;
-    const t = setTimeout(() => {
-      void apiFetch<{ users: UserSummaryDTO[] }>(
-        `/api/users/search?q=${encodeURIComponent(query)}`
-      ).then((data) => {
-        if (!cancelled) setResults(data.users);
-      });
-    }, 350);
+    void Promise.all([
+      apiFetch<{ users: UserSummaryDTO[] }>(`/api/users/${user.id}/following`),
+      apiFetch<{ users: UserSummaryDTO[] }>(`/api/users/${user.id}/followers`),
+    ]).then(([following, followers]) => {
+      if (cancelled) return;
+      const byId = new Map<string, UserSummaryDTO>();
+      for (const u of [...following.users, ...followers.users]) byId.set(u.id, u);
+      setCandidates([...byId.values()]);
+    });
     return () => {
       cancelled = true;
-      clearTimeout(t);
     };
-  }, [query]);
-
-  function handleQueryChange(value: string) {
-    setQuery(value);
-    if (!value.trim()) setResults([]);
-  }
+  }, [user.id]);
 
   async function handleAdd(userId: string) {
     setBusyId(userId);
@@ -63,8 +67,7 @@ function AddMemberBox({ groupId, onAdded }: { groupId: string; onAdded: () => vo
         method: "POST",
         body: JSON.stringify({ userId }),
       });
-      setResults((r) => r.filter((u) => u.id !== userId));
-      setQuery("");
+      setCandidates((cur) => cur?.filter((u) => u.id !== userId) ?? cur);
       onAdded();
     } catch (err) {
       notify(err instanceof ApiError ? err.message : "Não foi possível adicionar.");
@@ -73,19 +76,28 @@ function AddMemberBox({ groupId, onAdded }: { groupId: string; onAdded: () => vo
     }
   }
 
+  const available = candidates?.filter((u) => !existingMemberIds.includes(u.id)) ?? null;
+
   return (
-    <div className="flex flex-col gap-2 rounded-lg bg-neutral-900 p-3 ring-1 ring-white/10">
-      <input
-        value={query}
-        onChange={(e) => handleQueryChange(e.target.value)}
-        placeholder="Buscar pessoa por nome ou email…"
-        className="rounded bg-neutral-800 px-3 py-2 text-sm outline-none ring-1 ring-white/10 focus:ring-accent/50"
-      />
-      {results.length > 0 && (
+    <div className="flex flex-col gap-1 rounded-lg bg-neutral-900 p-3 ring-1 ring-white/10">
+      {available == null && <p className="px-1 text-sm text-neutral-500">Carregando…</p>}
+      {available?.length === 0 && (
+        <p className="px-1 text-sm text-neutral-500">
+          Todo mundo que você segue ou é seguido já está no grupo.
+        </p>
+      )}
+      {available && available.length > 0 && (
         <ul className="flex flex-col gap-1">
-          {results.map((u) => (
-            <li key={u.id} className="flex items-center justify-between gap-2 px-1">
-              <span className="truncate text-sm text-neutral-200">{u.name || "Sem nome"}</span>
+          {available.map((u) => (
+            <li key={u.id} className="flex items-center gap-2 px-1">
+              <div className="h-7 w-7 shrink-0 overflow-hidden rounded-full bg-neutral-800">
+                {u.avatarUrl && (
+                  <img src={u.avatarUrl} alt="" className="h-full w-full object-cover" />
+                )}
+              </div>
+              <span className="min-w-0 flex-1 truncate text-sm text-neutral-200">
+                {u.name || "Sem nome"}
+              </span>
               <button
                 type="button"
                 disabled={busyId === u.id}
@@ -311,7 +323,11 @@ function GroupDetail({
           )}
         </div>
         {addingMember && (
-          <AddMemberBox groupId={groupId} onAdded={() => void load()} />
+          <AddMemberBox
+            groupId={groupId}
+            existingMemberIds={group.members.map((m) => m.id)}
+            onAdded={() => void load()}
+          />
         )}
         <ul className="flex flex-wrap gap-2">
           {group.members.map((m) => (
